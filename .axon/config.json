@@ -1,0 +1,8 @@
+{
+  "verify": {
+    "commands": ["/bin/sh vscode-settings-templates/verify.sh"]
+  },
+  "issues": {
+    "dir": "docs/issues"
+  }
+}
