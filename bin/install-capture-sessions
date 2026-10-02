@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# =============================================================================
+# install-capture-sessions — one-time per-machine setup for the auto
+# session-capture LaunchAgent (com.arog.capture-sessions).
+# =============================================================================
+# Prerequisite: capture-sessions and capture-sessions.plist.template must
+# already be on THIS machine, in the same directory as this script (copy them
+# over first — see docs/guides/ar-session-log-sharing-guide.md). This script
+# does not transfer files between machines, it only sets up the LaunchAgent
+# locally using whatever is already sitting next to it.
+#
+# Why a template + substitution, not a universal plist: launchd does NOT
+# expand $HOME/~ in WatchPaths/StandardOutPath/StandardErrorPath — verified
+# directly (see the sharing guide). Every teammate needs their own generated
+# plist with fully-resolved absolute paths.
+#
+# Usage: ./install-capture-sessions
+# =============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SRC="${SCRIPT_DIR}/capture-sessions"
+TEMPLATE="${SCRIPT_DIR}/capture-sessions.template.plist"
+DEST_SCRIPT="${HOME}/.claude/bin/capture-sessions"
+TARGET_PLIST="${HOME}/Library/LaunchAgents/com.arog.capture-sessions.plist"
+
+echo "install-capture-sessions: setting up auto session-capture on this machine..."
+
+if [[ ! -f "$SCRIPT_SRC" ]]; then
+  echo "ERROR: ${SCRIPT_SRC} not found. Copy capture-sessions next to this installer first." >&2
+  exit 1
+fi
+if [[ ! -f "$TEMPLATE" ]]; then
+  echo "ERROR: ${TEMPLATE} not found. Copy capture-sessions.plist.template next to this installer first." >&2
+  exit 1
+fi
+
+resolve_python3() {
+  local candidate
+
+  if [[ -n "${PYTHON3_PATH:-}" && -x "${PYTHON3_PATH:-}" ]]; then
+    echo "$PYTHON3_PATH"
+    return 0
+  fi
+
+  for candidate in \
+    "$(command -v python3.13 2>/dev/null || true)" \
+    "$(command -v python3.12 2>/dev/null || true)" \
+    "$(command -v python3.11 2>/dev/null || true)" \
+    "$(command -v python3.10 2>/dev/null || true)" \
+    "/opt/homebrew/bin/python3" \
+    "/usr/local/bin/python3" \
+    "/opt/homebrew/opt/python@3.13/bin/python3.13" \
+    "/opt/homebrew/opt/python@3.12/bin/python3.12" \
+    "/opt/homebrew/opt/python@3.11/bin/python3.11" \
+    "/opt/homebrew/opt/python@3.10/bin/python3.10"
+  do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(command -v python3 || true)"
+  if [[ -n "$candidate" ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  return 1
+}
+
+PYTHON3_PATH="$(resolve_python3 || true)"
+if [[ -z "$PYTHON3_PATH" ]]; then
+  echo "ERROR: no python3 interpreter found. Install Homebrew Python (brew install python) or set PYTHON3_PATH=/full/path/to/python3.11 and rerun." >&2
+  exit 1
+fi
+
+PY_VERSION="$("$PYTHON3_PATH" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+PY_MAJOR="${PY_VERSION%%.*}"
+PY_MINOR="${PY_VERSION##*.}"
+if (( PY_MAJOR < 3 || ( PY_MAJOR == 3 && PY_MINOR < 10 ) )); then
+  echo "ERROR: ${PYTHON3_PATH} is Python ${PY_VERSION}. Need >= 3.10" >&2
+  echo "       (capture-sessions uses PEP 604 'X | None' syntax — this is a real, previously-hit crash on older Python; macOS's bundled /usr/bin/python3 is 3.9.x and will NOT work)" >&2
+  exit 1
+fi
+echo "OK  python3: ${PYTHON3_PATH} (${PY_VERSION})"
+
+mkdir -p "${HOME}/.claude/bin" "${HOME}/.claude/logs" "${HOME}/.claude/cache" "${HOME}/.claude/docs/sessions" "${HOME}/Library/LaunchAgents"
+
+if [[ "$SCRIPT_SRC" != "$DEST_SCRIPT" ]]; then
+  cp "$SCRIPT_SRC" "$DEST_SCRIPT"
+fi
+chmod +x "$DEST_SCRIPT"
+echo "OK  script installed at: ${DEST_SCRIPT}"
+
+sed -e "s#__HOME__#${HOME}#g" -e "s#__PYTHON3__#${PYTHON3_PATH}#g" "$TEMPLATE" > "$TARGET_PLIST"
+echo "OK  plist generated at: ${TARGET_PLIST}"
+
+launchctl unload "$TARGET_PLIST" 2>/dev/null || true
+launchctl load "$TARGET_PLIST"
+
+if launchctl list | grep -q com.arog.capture-sessions; then
+  echo "OK  LaunchAgent loaded and running."
+  echo "Check ${HOME}/.claude/docs/sessions/ shortly for a new file — RunAtLoad fires one capture immediately."
+else
+  echo "FAILED — LaunchAgent did not load. Check ${HOME}/.claude/logs/capture-sessions.err" >&2
+  exit 1
+fi

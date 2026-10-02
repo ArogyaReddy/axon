@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ar-req-log — Manually capture the current session's requirement
+#
+# Like ar-session-log and ar-park-log but for requirements.
+# Reads the most recent session log or a text you provide,
+# runs extract-req.mjs, and writes a human-readable req file.
+#
+# Usage:
+#   ar-req-log                          # auto-reads current session's first message
+#   ar-req-log "fix the mermaid bug"    # explicit text — use when auto fails
+#   ar-req-log --show                   # show the most recently captured requirement
+#
+# Output: ~/.claude/session-env/{YYYYMMDD}/req-{YYYYMMDD}-{HHMMSS}-{8charId}.json
+
+set -e
+
+SESSION_ENV="$HOME/.claude/session-env"
+EXTRACT="$HOME/.claude/scripts/extract-req.mjs"
+SESSIONS_DIR="$HOME/.claude/docs/sessions"
+
+# ── --show: display most recent req file ─────────────────────────────────────
+
+if [[ "$1" == "--show" ]]; then
+  LATEST=$(find "$SESSION_ENV" -name "req-*.json" 2>/dev/null | sort -r | head -1)
+  if [[ -z "$LATEST" ]]; then
+    echo "No requirement files found in $SESSION_ENV"
+    echo "Run: ar-req-log \"your session goal\""
+    exit 1
+  fi
+  echo "=== Most recent requirement ==="
+  echo "File: $LATEST"
+  echo ""
+  node -e "
+const d = require('$LATEST');
+console.log('Raw:', d.raw);
+console.log('');
+console.log('Action:', d.action || '(not detected)');
+console.log('Subject:', d.subject || '(not detected)');
+console.log('Target:', d.target || '(none)');
+console.log('');
+if (d.constraints && d.constraints.length) {
+  console.log('Constraints:');
+  d.constraints.forEach(c => console.log('  -', c));
+  console.log('');
+}
+if (d.criteria && d.criteria.length) {
+  console.log('Acceptance criteria:');
+  d.criteria.forEach((c,i) => console.log('  ' + (i+1) + '.', c));
+}
+"
+  exit 0
+fi
+
+# ── Get text ──────────────────────────────────────────────────────────────────
+
+TEXT="$*"
+
+if [[ -z "$TEXT" ]]; then
+  # Auto-detect from most recent session log — find first "**You:**" line
+  if ls "$SESSIONS_DIR"/*copilot*.md &>/dev/null 2>&1; then
+    LATEST_SESSION=$(ls -t "$SESSIONS_DIR"/*copilot*.md | head -1)
+    # Match lines starting with **You:** — anchor at line start, skip AI response lines
+    TEXT=$(grep -m1 '^\*\*You:\*\*' "$LATEST_SESSION" 2>/dev/null | sed 's/^\*\*You:\*\* //' | head -c 500)
+  fi
+
+  if [[ -z "$TEXT" ]]; then
+    echo "Could not auto-detect session requirement."
+    echo ""
+    echo "Usage: ar-req-log \"describe your goal\""
+    echo "Example: ar-req-log \"fix the mermaid rendering in capture-sessions\""
+    exit 1
+  fi
+
+  echo "Auto-detected from session log:"
+  echo "  $TEXT"
+  echo ""
+fi
+
+# ── Build human-readable filename ─────────────────────────────────────────────
+
+TODAY=$(date +%Y%m%d)
+TIME=$(date +%H%M)
+SHORT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)
+TEMP_SESSION="manual-${TODAY}-${TIME}-${SHORT_ID}"
+DATE_DIR="$SESSION_ENV/$TODAY"
+mkdir -p "$DATE_DIR"
+
+# ── Run extractor ─────────────────────────────────────────────────────────────
+
+node "$EXTRACT" --session "$TEMP_SESSION" --text "$TEXT" 2>/dev/null
+
+# extract-req.mjs writes to session-env/{YYYYMMDD}/req-{HHmm}-{sessionId}.json
+OUT_FILE=$(find "$DATE_DIR" -name "req-*${SHORT_ID}*.json" 2>/dev/null | tail -1)
+
+# ── Show result ───────────────────────────────────────────────────────────────
+
+if [[ -f "$OUT_FILE" ]]; then
+  echo "✅ Requirement captured: $OUT_FILE"
+  echo ""
+  node -e "
+const d = require('$OUT_FILE');
+console.log('Action:', d.action || '(not detected)');
+console.log('Subject:', d.subject || '(not detected)');
+if (d.criteria && d.criteria.length) {
+  console.log('');
+  console.log('Acceptance criteria:');
+  d.criteria.forEach((c,i) => console.log('  ' + (i+1) + '.', c));
+}
+"
+else
+  echo "❌ Extractor did not produce output. Check: $EXTRACT"
+  exit 1
+fi

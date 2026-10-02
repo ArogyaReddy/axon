@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+// axon-council: the deterministic part of the agent council. Runs five council-advisor answers (one lens each) and
+// then five anonymous reviews, each round as parallel `claude -p --agent council-advisor` processes; shuffles and
+// rotates the answers in code; writes the transcript itself. The chairman (the calling session) only frames the
+// question before and writes the verdict after. Measured: a skill-driven council ran its agents one by one ($1.70, 342 s).
+// Usage: axon-council --slug <name> [--files a,b,c] <<'EOF' <framed question> EOF
+//          writes <docs>/council/<date>-<name>.question.md and <date>-<name>.md (docs: $AXON_DOCS_DIR or ~/.claude/docs)
+//        axon-council --question <file> --out <transcript.md> [--files a,b,c]
+//        axon-council --verdict <name or transcript path> <<'EOF' <verdict> EOF   (fills the placeholder; no Read/Edit)
+import { spawn } from 'node:child_process';
+import { randomInt } from 'node:crypto';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from '../lib/args.mjs';
+
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const LENSES = ['Contrarian', 'First principles', 'Expansionist', 'Outsider', 'Executor'];
+const LETTERS = ['A', 'B', 'C', 'D', 'E'];
+const CLAUDE = process.env.AXON_CLAUDE_BIN || 'claude';
+const TIMEOUT_MS = 300000;
+// Parallel calls cannot reuse each other's prompt cache: start one, then the rest once the shared prefix is cached.
+const STAGGER_MS = Number(process.env.AXON_COUNCIL_STAGGER_MS ?? 4000);
+// Measured per call: project settings only + medium effort cut advise 13% and review 23% (high-effort thinking that a
+// 190-word answer does not need). Settings env (e.g. Bedrock at work) still reaches the call through the process env.
+const SETTINGS = JSON.stringify({ effortLevel: 'medium' });
+// --files are read once here and sent as the system prompt, identical for all ten calls, which Claude Code caches:
+// one cache write and nine cheap reads, instead of five advisors each reading (and cache-writing) the same files.
+const CONTEXT_CAP = 120000;
+
+function fileContext(list) {
+  const parts = ['Files for this council (read-only; cite as path:line):'];
+  let used = parts[0].length;
+  for (const f of list) {
+    let text;
+    try { text = readFileSync(f, 'utf8'); } catch { throw new Error(`file not found: ${f}`); }
+    const lines = text.replace(/\n$/, '').split('\n');
+    const out = [`=== ${f} ===`];
+    for (let i = 0; i < lines.length; i++) {
+      const row = `${String(i + 1).padStart(5)}\t${lines[i]}`;
+      if (used + row.length + 1 > CONTEXT_CAP) { out.push(`... (truncated: ${lines.length - i} more lines of ${f})`); break; }
+      out.push(row);
+      used += row.length + 1;
+    }
+    parts.push(out.join('\n'));
+  }
+  return parts.join('\n\n');
+}
+
+let SYSTEM = null;
+
+function once(prompt, { tools = !SYSTEM } = {}) {
+  return new Promise(resolve => {
+    const args = ['-p', prompt, '--agent', 'axon-core:council-advisor', '--model', 'sonnet', '--output-format', 'json',
+      '--setting-sources', 'project', '--settings', SETTINGS, '--strict-mcp-config', '--no-session-persistence',
+      '--plugin-dir', PLUGIN_ROOT, ...(SYSTEM ? ['--append-system-prompt', SYSTEM] : []), ...(tools ? [] : ['--tools', ''])];
+    const child = spawn(CLAUDE, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => child.kill('SIGTERM'), TIMEOUT_MS);
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { err += d; });
+    child.on('error', e => { clearTimeout(timer); resolve({ ok: false, error: e.message, cost: 0 }); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      try {
+        const j = JSON.parse(out);
+        resolve(j.is_error || code !== 0
+          ? { ok: false, error: j.result || `exit ${code}`, cost: j.total_cost_usd ?? 0 }
+          : { ok: true, text: String(j.result).trim(), cost: j.total_cost_usd ?? 0 });
+      } catch {
+        resolve({ ok: false, error: (err || out || `exit ${code}`).trim().slice(0, 300), cost: 0 });
+      }
+    });
+  });
+}
+
+// One retry: a transient API or process failure must not cost a whole council.
+async function ask(prompt, opts) {
+  const first = await once(prompt, opts);
+  if (first.ok) return first;
+  const second = await once(prompt, opts);
+  return { ...second, cost: first.cost + second.cost };
+}
+
+// Start the first job, wait STAGGER_MS, start the others together; resolve in the original order.
+async function round(jobs) {
+  const first = jobs[0]();
+  await new Promise(r => setTimeout(r, STAGGER_MS));
+  return Promise.all([first, ...jobs.slice(1).map(j => j())]);
+}
+
+function shuffled(items) {
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) { const j = randomInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+const PLACEHOLDER = '_(chairman: add the verdict here)_';
+const councilDir = () => path.join(process.env.AXON_DOCS_DIR || path.join(os.homedir(), '.claude', 'docs'), 'council');
+const today = () => new Date().toISOString().slice(0, 10);
+
+async function stdinText() {
+  let text = '';
+  for await (const chunk of process.stdin) text += chunk;
+  return text;
+}
+
+// A bare name means the newest transcript for that slug in the council folder.
+function transcriptFor(ref) {
+  if (ref.endsWith('.md')) return ref;
+  const hits = readdirSync(councilDir()).filter(f => f.endsWith(`-${ref}.md`)).sort();
+  if (!hits.length) throw new Error(`no council transcript for "${ref}" in ${councilDir()}`);
+  return path.join(councilDir(), hits.at(-1));
+}
+
+async function verdict(ref) {
+  const file = transcriptFor(ref);
+  const text = await stdinText();
+  const md = readFileSync(file, 'utf8');
+  if (!md.includes(PLACEHOLDER)) throw new Error(`no verdict placeholder in ${file} (already filled?)`);
+  if (!text.trim()) throw new Error('empty verdict on stdin');
+  writeFileSync(file, md.replace(PLACEHOLDER, text.trim()));
+  process.stdout.write(`Verdict saved: ${path.resolve(file)}\n`);
+}
+
+async function main() {
+  const { option } = parseArgs(process.argv.slice(2));
+  if (option('verdict')) return verdict(option('verdict'));
+  let question;
+  let outFile = option('out');
+  if (option('slug')) {
+    const slug = option('slug').replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+    question = (await stdinText()).trim();
+    if (!question) throw new Error('the framed question goes on stdin');
+    mkdirSync(councilDir(), { recursive: true });
+    writeFileSync(path.join(councilDir(), `${today()}-${slug}.question.md`), `${question}\n`);
+    outFile = path.join(councilDir(), `${today()}-${slug}.md`);
+  } else if (option('question') && outFile) {
+    question = readFileSync(option('question'), 'utf8').trim();
+  } else {
+    throw new Error("Usage: axon-council --slug <name> [--files a,b,c] <<'EOF' <question> EOF   (or --question <file> --out <file>)");
+  }
+  if (option('files')) SYSTEM = fileContext(option('files').split(',').map(f => f.trim()).filter(Boolean));
+  const t0 = Date.now();
+
+  const answers = await round(LENSES.map(lens => () => ask(`Mode ADVISE. Lens: ${lens}.\n\nQuestion:\n${question}`)));
+  const failed = answers.filter(a => !a.ok).length;
+  if (failed >= 3) throw new Error(`${failed} of 5 advisors failed: ${answers.filter(a => !a.ok).map(a => a.error).join(' | ')}`);
+  const text = i => (answers[i].ok ? answers[i].text : `(no answer: ${answers[i].error})`);
+
+  // Letters are assigned at random; reviewer i sees the five answers in an order rotated by i.
+  const order = shuffled(LENSES.map((_, i) => i));
+  const byLetter = LETTERS.map((L, k) => ({ L, i: order[k] }));
+  const reviews = await round(LETTERS.map((_, r) => () => {
+    const seen = [...byLetter.slice(r), ...byLetter.slice(0, r)];
+    const body = seen.map(({ L, i }) => `### Answer ${L}\n\n${text(i)}`).join('\n\n');
+    return ask(`Mode REVIEW.\n\nQuestion:\n${question}\n\n${body}`, { tools: false }).then(res => ({ res, seen: seen.map(s => s.L).join(' ') }));
+  }));
+
+  const cost = [...answers, ...reviews.map(r => r.res)].reduce((s, a) => s + a.cost, 0);
+  const md = [
+    `# Council: ${question.split('\n')[0].slice(0, 120)}`,
+    '',
+    `Date: ${new Date().toISOString()}. Cost: $${cost.toFixed(2)} (10 calls). Wall: ${Math.round((Date.now() - t0) / 1000)} s.`,
+    '',
+    '## Question',
+    '',
+    question,
+    '',
+    '# Answers by lens',
+    '',
+    ...LENSES.flatMap((lens, i) => [`## ${lens}`, '', text(i), '']),
+    `Letter map: ${byLetter.map(({ L, i }) => `${L} = ${LENSES[i]}`).join(', ')}`,
+    '',
+    '# Reviews',
+    '',
+    ...reviews.flatMap(({ res, seen }, r) => [`## Reviewer ${r + 1} (order shown: ${seen})`, '', res.ok ? res.text : `(no review: ${res.error})`, '']),
+    '## Verdict',
+    '',
+    PLACEHOLDER,
+    '',
+  ].join('\n');
+  mkdirSync(path.dirname(path.resolve(outFile)), { recursive: true });
+  writeFileSync(outFile, md);
+  process.stdout.write(`Transcript: ${path.resolve(outFile)}\n\n${md}`);
+  if (failed) process.stderr.write(`axon-council: ${failed} advisor(s) gave no answer after one retry\n`);
+}
+
+main().catch(e => { process.stderr.write(`axon-council: ${e.message}\n`); process.exitCode = 1; });

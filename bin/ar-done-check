@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# ar-done-check — Zero-AI DONE_VERIFIED gate
+#
+# Replaces: asking Claude "is it done?" / "did tests pass?" / "any issues?"
+# Usage: ar-done-check [domain] [spec_file]
+# Exit 0 = DONE_VERIFIED criteria met. Exit 1 = NOT done.
+#
+# Saves ~200-800 tokens per DONE check by never asking Claude.
+
+set -e
+
+DOMAIN="${1:-}"
+SPEC_FILE="${2:-}"
+SESSION_DIR="$HOME/.claude/session-env"
+PASS=0
+FAIL=0
+ISSUES=()
+
+SESSION_ID=""
+ACTIVE_LOG=""
+
+# 1. Try active-*.jsonl (written by ar-activity-logger.js — VS Code + Claude Code)
+DATED_DIRS=$(ls -dt "$SESSION_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | head -3)
+for DIR in $DATED_DIRS; do
+  CANDIDATE=$(ls -t "$DIR"/active-*.jsonl 2>/dev/null | head -1)
+  if [[ -n "$CANDIDATE" ]]; then
+    ACTIVE_LOG="$CANDIDATE"
+    SESSION_ID=$(basename "$CANDIDATE" | sed 's/active-//;s/\.jsonl//')
+    break
+  fi
+done
+
+# 2. Fallback: old test-state-*.json (Claude Code CLI only)
+if [[ -z "$SESSION_ID" ]] && ls "$SESSION_DIR"/test-state-*.json &>/dev/null 2>&1; then
+  LATEST=$(ls -t "$SESSION_DIR"/test-state-*.json | head -1)
+  SESSION_ID=$(basename "$LATEST" | sed 's/test-state-//;s/\.json//')
+fi
+
+echo "=== ar-done-check ==="
+echo "Session: ${SESSION_ID:-not found}"
+echo ""
+
+if [[ -n "$ACTIVE_LOG" ]]; then
+  TESTS_RAN=$(node -e "
+    const lines = require('fs').readFileSync('$ACTIVE_LOG','utf8').split('\n').filter(Boolean);
+    const tests = lines.map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(e=>e&&e.type==='test');
+    console.log(tests.length > 0 ? 'yes' : 'no');
+  ")
+  if [[ "$TESTS_RAN" == "yes" ]]; then
+    echo "✅ Tests ran this session (activity log)"; ((PASS++))
+  else
+    echo "❌ No tests ran this session"
+    ISSUES+=("No tests were run — run: TEST_BUSINESS_DOMAIN=$DOMAIN npx jest $SPEC_FILE --no-coverage")
+    ((FAIL++))
+  fi
+
+  FAILED=$(node -e "
+    const lines = require('fs').readFileSync('$ACTIVE_LOG','utf8').split('\n').filter(Boolean);
+    const tests = lines.map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(e=>e&&e.type==='test');
+    console.log(tests.reduce((s,e)=>s+(e.failed||0),0));
+  ")
+  if [[ "$FAILED" == "0" ]]; then
+    echo "✅ Tests passed (0 failures)"; ((PASS++))
+  else
+    echo "❌ Tests have $FAILED failure(s)"
+    ISSUES+=("Fix the $FAILED failing test(s) first"); ((FAIL++))
+  fi
+
+  RGT=$(node -e "
+    const lines = require('fs').readFileSync('$ACTIVE_LOG','utf8').split('\n').filter(Boolean);
+    const tests = lines.map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(e=>e&&e.type==='test');
+    const rg = tests.some((e,i)=>!e.success && tests.slice(i+1).some(e2=>e2.success));
+    console.log(rg ? 'yes' : 'no');
+  ")
+  if [[ "$RGT" == "yes" ]]; then
+    echo "✅ RED→GREEN cycle confirmed (real TDD)"; ((PASS++))
+  else
+    echo "⚠️  No RED→GREEN transition seen"; ((PASS++))
+  fi
+elif [[ -n "$SESSION_ID" ]] && [[ -f "$SESSION_DIR/test-state-${SESSION_ID}.json" ]]; then
+  TESTS_RAN=$(node -e "const d=require('$SESSION_DIR/test-state-${SESSION_ID}.json'); console.log(d.testsRan ? 'yes' : 'no');")
+  if [[ "$TESTS_RAN" == "yes" ]]; then
+    echo "✅ Tests ran this session"; ((PASS++))
+  else
+    echo "❌ No tests ran this session"
+    ISSUES+=("No tests were run — run: TEST_BUSINESS_DOMAIN=$DOMAIN npx jest $SPEC_FILE --no-coverage")
+    ((FAIL++))
+  fi
+
+  FAILED=$(node -e "const d=require('$SESSION_DIR/test-state-${SESSION_ID}.json'); console.log(d.failed ?? -1);")
+  if [[ "$FAILED" == "0" ]]; then
+    echo "✅ Tests passed (0 failures)"; ((PASS++))
+  elif [[ "$FAILED" == "-1" ]]; then
+    echo "⚠️  Test result unknown (exit-code only)"; ((PASS++))
+  else
+    echo "❌ Tests have $FAILED failure(s)"
+    ISSUES+=("Fix the $FAILED failing test(s) first"); ((FAIL++))
+  fi
+
+  RGT=$(node -e "const d=require('$SESSION_DIR/test-state-${SESSION_ID}.json'); console.log(d.redGreenTransition ? 'yes' : 'no');")
+  if [[ "$RGT" == "yes" ]]; then
+    echo "✅ RED→GREEN cycle confirmed (real TDD)"; ((PASS++))
+  else
+    echo "⚠️  No RED→GREEN transition seen"; ((PASS++))
+  fi
+else
+  echo "❌ No test data found for this session (no active log, no test-state file)"
+  ISSUES+=("Run tests first — no test activity recorded for this session."); ((FAIL++))
+fi
+
+if [[ -n "$SESSION_ID" ]] && find "$SESSION_DIR" -name "*${SESSION_ID}*" 2>/dev/null | grep -q .; then
+  echo "✅ Requirement captured for this session"; ((PASS++))
+else
+  echo "⚠️  No requirement file (ar-req-capture may not have fired yet)"
+fi
+
+if [[ -n "$SPEC_FILE" ]]; then
+  if [[ -f "$SPEC_FILE" ]]; then
+    echo "✅ Spec file exists: $SPEC_FILE"; ((PASS++))
+  else
+    echo "❌ Spec file missing: $SPEC_FILE"
+    ISSUES+=("Spec file not found: $SPEC_FILE"); ((FAIL++))
+  fi
+fi
+
+CHANGED_TS=$(git diff --name-only HEAD 2>/dev/null | grep '\.ts$' | grep -v '\.spec\.' | head -10)
+COMPILE_FAILS=0
+for TS_FILE in $CHANGED_TS; do
+  if ! node --check "$TS_FILE" 2>/dev/null; then
+    echo "❌ Syntax error: $TS_FILE"
+    ISSUES+=("Fix syntax error in: $TS_FILE"); ((COMPILE_FAILS++)); ((FAIL++))
+  fi
+done
+if [[ $COMPILE_FAILS -eq 0 ]] && [[ -n "$CHANGED_TS" ]]; then
+  echo "✅ All changed .ts files compile"; ((PASS++))
+fi
+
+echo ""
+echo "Score: $PASS passed, $FAIL failed"
+echo ""
+
+if [[ ${#ISSUES[@]} -gt 0 ]]; then
+  echo "Issues to fix:"
+  for issue in "${ISSUES[@]}"; do echo "  → $issue"; done
+  echo ""
+  echo "STATUS: NOT_DONE_VERIFIED"
+  exit 1
+else
+  echo "STATUS: DONE_VERIFIED ✅"
+  exit 0
+fi

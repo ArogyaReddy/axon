@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+// check-security-fields (platform pattern 3, incident IFX-004): ClientID, EventID and VersionNumber never come from
+// user-supplied input. Correct sources: session.eventContext.clientID, this.eventID, a literal 1 on create.
+// Heuristic: flags an assignment of one of these fields whose value reads from input, body, payload, request,
+// params or args. Usage: check-security-fields [--base <ref>] [--all]
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { runChecker, lineOf } from '../lib/changed.mjs';
+
+const FIELD = /\b(ClientID|clientID|clientId|EventID|eventID|eventId|VersionNumber|versionNumber)\b\s*[:=](?!=)\s*([^;,\n)}]+)/g;
+const USER = /\b(input|body|payload|request|req|params|args|query)\b/i;
+const SOURCE = { client: 'session.eventContext.clientID', event: 'this.eventID', version: 'a literal 1 on create' };
+
+runChecker('check-security-fields', (root, files) => {
+  const findings = [];
+  for (const file of files.filter(f => /^src\/(?!shared\/).+\.tsx?$/.test(f) && !/\.(spec|test)\.tsx?$/.test(f))) {
+    const text = readFileSync(path.join(root, file), 'utf8');
+    for (const m of text.matchAll(FIELD)) {
+      const value = m[2].trim();
+      if (!USER.test(value) || /session\.eventContext|this\.eventID/.test(value)) continue;
+      const kind = /client/i.test(m[1]) ? 'client' : /event/i.test(m[1]) ? 'event' : 'version';
+      findings.push({ file, line: lineOf(text, m.index), message: `${m[1]} taken from user input (${value}); use ${SOURCE[kind]}` });
+    }
+  }
+  return findings;
+});

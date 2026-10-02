@@ -1,0 +1,16 @@
+{
+  "note": "Session flags, set in a prompt as #Name=YES or #Name=NO. Ported from the legacy FRAMEWORK-FEATURE-FLAGS.md. 'effect' describes the non-default value.",
+  "nonNegotiable": "These never change with any flag: plan approval before code, DONE only with verification evidence, confirmation before irreversible actions.",
+  "flags": [
+    { "name": "ChatOutput", "default": "YES", "effect": "suppress ordinary narration, commentary and preambles" },
+    { "name": "DocumentCreation", "default": "NO", "effect": "save substantial output (plan, spec, analysis) to a file instead of chat only" },
+    { "name": "BetterExplanation", "default": "NO", "effect": "plain-language explanation with a Mermaid diagram for every process, flow or decision, plus the real result or proof" },
+    { "name": "PseudoCode", "default": "NO", "effect": "express logic in the WH-word pseudo-code DSL (WHAT/WHERE/WHEN/WHY/WHO/HOW/IF-THEN/DO/WHILE) alongside real code" },
+    { "name": "GroundWork", "default": "NO", "effect": "before the answer, explain the groundwork (WHAT/WHY/HOW/WHERE/WHO, root cause, core concepts), researched and shown with proof" },
+    { "name": "FlowCharts", "default": "NO", "effect": "diagram every path of a flow, process or plan end to end" },
+    { "name": "AskForClarifications", "aliases": ["AskMe"], "default": "NO", "effect": "ask clarifying questions up front until both the ask and the plan are clear" },
+    { "name": "BeProActive", "default": "NO", "effect": "for every non-trivial task, visibly run ANALYZE, EXPLORE, MAP POSSIBILITIES, VERIFY, EXECUTE, REPORT with proof, SUGGEST NEXT" },
+    { "name": "ExplainWithResults", "default": "NO", "effect": "every answer shows What I tried, What happened (verbatim output), What it means, What I concluded" },
+    { "name": "AgentsFactory", "default": "NO", "effect": "fan out subagents for genuinely independent subtasks (2-4x token cost); shared reasoning stays inline" }
+  ]
+}

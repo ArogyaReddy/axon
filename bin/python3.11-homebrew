@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export DYLD_FRAMEWORK_PATH='/opt/homebrew/var/homebrew/tmp/.cellar/python@3.11/3.11.15_4/Frameworks'
+exec '/opt/homebrew/var/homebrew/tmp/.cellar/python@3.11/3.11.15_4/Frameworks/Python.framework/Versions/3.11/bin/python3.11' "$@"

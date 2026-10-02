@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+/**
+ * ar-rollup-server — LaunchAgent entry point for the always-on live
+ * dashboard (Gap 4). See ~/Library/LaunchAgents/com.arog.rollup-server.plist
+ *
+ * SECURITY: binds to 127.0.0.1 ONLY. Personal, single-user, local-only tool.
+ * See hooks/lib/rollup-server.js for the actual route/security logic.
+ *
+ * Manual usage (without the LaunchAgent):
+ *   node ~/.claude/bin/ar-rollup-server [--port N]
+ */
+
+const { createServer } = require("../hooks/lib/rollup-server.js");
+
+const args = process.argv.slice(2);
+const portIdx = args.indexOf("--port");
+const port = portIdx !== -1 ? parseInt(args[portIdx + 1], 10) : 47301;
+
+const server = createServer();
+
+server.listen(port, "127.0.0.1", () => {
+  console.log(`AROG rollup dashboard listening on http://127.0.0.1:${port}`);
+});
+
+server.on("error", (err) => {
+  console.error("ar-rollup-server failed to start:", err.message);
+  process.exit(1);
+});

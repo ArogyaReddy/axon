@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+// axon-mindmap: render a markmap outline (.md) to a self-contained offline HTML file with the pinned markmap-cli
+// (~/.axon/tools/markmap, installed by `axon tools install`). Adds the default markmap options when the outline has
+// none: one color per top-level branch, two levels expanded, readable node width.
+// Usage: axon-mindmap <outline.md> [-o <out.html>]
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const [input, flag, out] = process.argv.slice(2);
+if (!input || (flag && flag !== '-o')) { console.error('Usage: axon-mindmap <outline.md> [-o <out.html>]'); process.exit(2); }
+const home = process.env.AXON_HOME || path.join(os.homedir(), '.axon');
+const bin = path.join(home, 'tools', 'markmap', 'node_modules', '.bin', 'markmap');
+if (!existsSync(bin)) { console.error(`markmap-cli is not installed for axon (${bin}). Run: axon tools install`); process.exit(127); }
+const output = out ?? input.replace(/\.md$/, '') + '.html';
+let text = readFileSync(input, 'utf8');
+let source = input;
+if (!/^---\n[\s\S]*?\bmarkmap:/.test(text)) {
+  text = `---\nmarkmap:\n  colorFreezeLevel: 2\n  initialExpandLevel: 2\n  maxWidth: 420\n---\n\n${text}`;
+  source = path.join(path.dirname(output), `.${path.basename(input)}.axon-tmp.md`);
+  writeFileSync(source, text);
+}
+const r = spawnSync(bin, [source, '--offline', '--no-open', '-o', output], { stdio: ['ignore', 'ignore', 'inherit'] });
+if (source !== input) rmSync(source, { force: true });
+if (r.status !== 0) process.exit(r.status ?? 1);
+console.log(`Mind map: ${path.resolve(output)} (offline, open it in any browser)`);

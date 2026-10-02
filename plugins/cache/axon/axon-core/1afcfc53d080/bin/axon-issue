@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+// axon-issue: the issue tracker CLI on Claude's PATH (plugin bin). Same commands as `axon issue`, without the "issue" word.
+import path from 'node:path';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(realpathSync(fileURLToPath(import.meta.url)));
+const { runIssueCli } = await import(path.join(here, '..', 'lib', 'issue-cli.mjs'));
+process.exitCode = runIssueCli(process.argv.slice(2));

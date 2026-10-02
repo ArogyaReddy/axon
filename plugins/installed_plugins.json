@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "plugins": {
+    "axon-core@axon": [
+      {
+        "scope": "user",
+        "installPath": "/Users/arog/.claude/plugins/cache/axon/axon-core/d58eca96ea21",
+        "version": "d58eca96ea21",
+        "installedAt": "2026-10-01T23:13:53.550Z",
+        "lastUpdated": "2026-10-01T23:13:53.550Z",
+        "gitCommitSha": "d58eca96ea21d4859d9511005a85d2bb52dc00dc"
+      }
+    ],
+    "axon-guard@axon": [
+      {
+        "scope": "user",
+        "installPath": "/Users/arog/.claude/plugins/cache/axon/axon-guard/d58eca96ea21",
+        "version": "d58eca96ea21",
+        "installedAt": "2026-10-01T23:13:54.367Z",
+        "lastUpdated": "2026-10-01T23:13:54.367Z",
+        "gitCommitSha": "d58eca96ea21d4859d9511005a85d2bb52dc00dc"
+      }
+    ],
+    "axon-qa@axon": [
+      {
+        "scope": "user",
+        "installPath": "/Users/arog/.claude/plugins/cache/axon/axon-qa/d58eca96ea21",
+        "version": "d58eca96ea21",
+        "installedAt": "2026-10-01T23:13:55.206Z",
+        "lastUpdated": "2026-10-01T23:13:55.206Z",
+        "gitCommitSha": "d58eca96ea21d4859d9511005a85d2bb52dc00dc"
+      }
+    ],
+    "axon-learn@axon": [
+      {
+        "scope": "user",
+        "installPath": "/Users/arog/.claude/plugins/cache/axon/axon-learn/d58eca96ea21",
+        "version": "d58eca96ea21",
+        "installedAt": "2026-10-01T23:13:56.026Z",
+        "lastUpdated": "2026-10-01T23:13:56.026Z",
+        "gitCommitSha": "d58eca96ea21d4859d9511005a85d2bb52dc00dc"
+      }
+    ],
+    "axon-adp@axon": [
+      {
+        "scope": "user",
+        "installPath": "/Users/arog/.claude/plugins/cache/axon/axon-adp/d58eca96ea21",
+        "version": "d58eca96ea21",
+        "installedAt": "2026-10-01T23:14:29.813Z",
+        "lastUpdated": "2026-10-01T23:14:29.813Z",
+        "gitCommitSha": "d58eca96ea21d4859d9511005a85d2bb52dc00dc"
+      }
+    ],
+    "axon-observe@axon": [
+      {
+        "scope": "user",
+        "installPath": "/Users/arog/.claude/plugins/cache/axon/axon-observe/d58eca96ea21",
+        "version": "d58eca96ea21",
+        "installedAt": "2026-10-01T23:14:29.813Z",
+        "lastUpdated": "2026-10-01T23:14:29.813Z",
+        "gitCommitSha": "d58eca96ea21d4859d9511005a85d2bb52dc00dc"
+      }
+    ]
+  }
+}

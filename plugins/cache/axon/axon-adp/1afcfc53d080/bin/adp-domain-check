@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+// adp-domain-check: TypeScript check and domain test suite for each business domain touched by the change
+// (platform pattern 8: scoped runs, never the whole 15-domain monorepo). Run by axon-verify in adp-e-product.
+// Usage: adp-domain-check [--base <ref>] [--all-domains d1,d2] [--skip-tests]
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { changedFiles, domainsOf, repoRoot } from '../lib/changed.mjs';
+
+const argv = process.argv.slice(2);
+const opt = k => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : undefined; };
+const root = repoRoot();
+const files = changedFiles(root, { base: opt('base') });
+const domains = opt('all-domains') ? opt('all-domains').split(',') : domainsOf(files);
+const shared = files.some(f => f.startsWith('src/shared/'));
+const steps = [];
+if (shared) steps.push({ label: 'tsc src/shared', cwd: 'src/shared', cmd: 'npx', args: ['tsc', '--noEmit'] });
+for (const d of domains) {
+  if (!existsSync(path.join(root, 'src', d))) continue;
+  steps.push({ label: `tsc src/${d}`, cwd: path.join('src', d), cmd: 'npx', args: ['tsc', '--noEmit'] });
+  if (!argv.includes('--skip-tests')) steps.push({ label: `jest ${d}`, cwd: '.', cmd: 'npx', args: ['jest', '--no-coverage'], env: { TEST_BUSINESS_DOMAIN: d } });
+}
+if (!steps.length) { console.log('adp-domain-check: no domain or shared changes; nothing to check'); process.exit(0); }
+let failed = 0;
+for (const s of steps) {
+  process.stdout.write(`\n== ${s.label}${s.env ? ` (TEST_BUSINESS_DOMAIN=${s.env.TEST_BUSINESS_DOMAIN})` : ''}\n`);
+  const r = spawnSync(s.cmd, s.args, { cwd: path.join(root, s.cwd), stdio: 'inherit', env: { ...process.env, ...s.env } });
+  if (r.status !== 0) { failed++; console.log(`!! ${s.label} FAILED (exit ${r.status})`); }
+}
+console.log(`\nadp-domain-check: ${steps.length - failed}/${steps.length} passed (domains: ${domains.join(', ') || 'none'}${shared ? ', shared' : ''})`);
+process.exitCode = failed ? 1 : 0;

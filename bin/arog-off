@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# =============================================================================
+# arog-off — stop all AROG background daemons (LaunchAgents).
+# =============================================================================
+# Zero-AI. Unloads the same 4 LaunchAgents arog-on starts. Safe to run
+# repeatedly — skips any daemon already stopped. Does NOT delete the plist
+# files, so `arog-on` (or a reboot, since these are RunAtLoad+KeepAlive) will
+# bring them back — this is a pause, not an uninstall.
+# =============================================================================
+
+set -uo pipefail
+
+PLIST_DIR="${HOME}/Library/LaunchAgents"
+PLISTS=(com.arog.rollup-server com.arog.ar-checkgate com.arog.capture-sessions com.arog.pr-notify)
+
+echo "arog-off: stopping AROG background daemons..."
+for label in "${PLISTS[@]}"; do
+  plist="${PLIST_DIR}/${label}.plist"
+  if [[ ! -f "$plist" ]]; then
+    echo "  SKIP  ${label} — plist not found at ${plist}"
+    continue
+  fi
+  if launchctl list "$label" &>/dev/null; then
+    if launchctl unload "$plist" 2>/dev/null; then
+      echo "  STOP  ${label}"
+    else
+      echo "  FAIL  ${label} — launchctl unload failed"
+    fi
+  else
+    echo "  OK    ${label} — already stopped"
+  fi
+done
+echo "arog-off: done. Run 'arog status' to verify."

@@ -1,0 +1,41 @@
+#!/usr/bin/env node
+// check-shared-imports (platform pattern 12, incident IFX-001): every package imported in src/shared/ is listed in the
+// ROOT package.json. A package only in a domain's package.json breaks Jenkins for every domain that uses shared.
+// Usage: check-shared-imports [--base <ref>] [--all]
+import { builtinModules } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { runChecker, lineOf } from '../lib/changed.mjs';
+
+const IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\(\s*|^\s*import\s+)(['"])([^'"]+)\1/gm;
+const pkgName = spec => (spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]);
+
+function aliases(root) {
+  const out = [];
+  for (const f of ['tsconfig.json', path.join('src', 'shared', 'tsconfig.json')]) {
+    try {
+      const text = readFileSync(path.join(root, f), 'utf8').replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, '').replace(/,(\s*[}\]])/g, '$1');
+      out.push(...Object.keys(JSON.parse(text).compilerOptions?.paths ?? {}).map(k => k.replace(/\*$/, '')));
+    } catch { /* no tsconfig or not parseable: no aliases */ }
+  }
+  return out;
+}
+
+runChecker('check-shared-imports', (root, files) => {
+  const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const declared = new Set(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].flatMap(k => Object.keys(pkg[k] ?? {})));
+  const builtin = new Set(builtinModules);
+  const alias = aliases(root);
+  const findings = [];
+  for (const file of files.filter(f => /^src\/shared\/.+\.(ts|tsx|js|mjs|cjs)$/.test(f) && existsSync(path.join(root, f)))) {
+    const text = readFileSync(path.join(root, file), 'utf8');
+    for (const m of text.matchAll(IMPORT)) {
+      const spec = m[2];
+      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:') || alias.some(a => a && spec.startsWith(a))) continue;
+      const name = pkgName(spec);
+      if (builtin.has(name) || declared.has(name)) continue;
+      findings.push({ file, line: lineOf(text, m.index), message: `"${name}" is not in the root package.json (add it there, not only in a domain package.json)` });
+    }
+  }
+  return findings;
+});

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# verify.sh - standard post-edit checks for an interactive-book doc.
+# Usage: axon-book-verify <path-to-doc.md>
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+  echo "Usage: verify.sh <path-to-doc.md>" >&2
+  exit 1
+fi
+
+FILE="$1"
+
+if [ ! -f "$FILE" ]; then
+  echo "File not found: $FILE" >&2
+  exit 1
+fi
+
+echo "=== $FILE ==="
+
+CORRUPT=$(grep -c $'\xef\xbf\xbd' "$FILE" || true)
+echo "Corrupted replacement chars (should be 0): $CORRUPT"
+
+DETAILS=$(grep -c '<details>' "$FILE" || true)
+echo "Inline <details> blocks: $DETAILS"
+
+echo "Ledger entries:"
+grep -n '^### Q[0-9]\+$' "$FILE" || echo "  (none found)"
+
+MERMAID=$(grep -c '```mermaid' "$FILE" || true)
+echo "Mermaid diagrams: $MERMAID"
+
+LINES=$(wc -l < "$FILE" | tr -d ' ')
+echo "Total lines: $LINES"
+
+if [ "$CORRUPT" -gt 0 ]; then
+  echo "FAIL: corrupted characters found - fix before calling this done." >&2
+  exit 2
+fi
+
+echo "OK: no corruption detected."

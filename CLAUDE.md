@@ -1,0 +1,1 @@
+/nix/store/ihfkm3v1rkd64ayl1kmp1cf69phbc1qi-home-manager-files/.claude/CLAUDE.md

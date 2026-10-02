@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+// check-i18n (platform patterns 2 and 11): every translate('KEY') in a changed controller or event has the key in
+// both messages-en.json and messages-es.json, and changed locale files keep the same keys. A missing key does not
+// throw: it renders the raw key in production UI.
+// Usage: check-i18n [--base <ref>] [--all]
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { runChecker, lineOf } from '../lib/changed.mjs';
+
+const LOCALES = ['en', 'es'];
+const keysOf = (obj, prefix = '') => Object.entries(obj).flatMap(([k, v]) =>
+  (v && typeof v === 'object' && !Array.isArray(v) ? [`${prefix}${k}`, ...keysOf(v, `${prefix}${k}.`)] : [`${prefix}${k}`]));
+const load = f => { try { return new Set(keysOf(JSON.parse(readFileSync(f, 'utf8')))); } catch { return null; } };
+
+// src/<domain>/controllers/conversations/<noun.verb>.ctrl.tsx -> i18n/controllers/<noun.verb>/
+// src/<domain>/events/<noun.verb>/<file>.ts(x)                 -> i18n/event/<noun.verb>/
+function i18nDirFor(file) {
+  let m = /^src\/[^/]+\/controllers\/conversations\/([^/]+)\.ctrl\.tsx$/.exec(file);
+  if (m) return path.join('i18n', 'controllers', m[1]);
+  m = /^src\/[^/]+\/events\/([^/]+)\/[^/]+\.tsx?$/.exec(file);
+  if (m && !/\.(spec|test)\.tsx?$/.test(file)) return path.join('i18n', 'event', m[1]);
+  return null;
+}
+
+runChecker('check-i18n', (root, files) => {
+  const findings = [];
+  for (const file of files) {
+    const dir = i18nDirFor(file);
+    if (!dir) continue;
+    const text = readFileSync(path.join(root, file), 'utf8');
+    const uses = [...text.matchAll(/\btranslate\(\s*(['"`])([^'"`$]+)\1/g)];
+    if (!uses.length) continue;
+    for (const loc of LOCALES) {
+      const f = path.join(dir, `messages-${loc}.json`);
+      const keys = load(path.join(root, f));
+      if (!keys) { findings.push({ file, line: lineOf(text, uses[0].index), message: `${f} missing or not valid JSON` }); continue; }
+      for (const u of uses) if (!keys.has(u[2])) findings.push({ file, line: lineOf(text, u.index), message: `key "${u[2]}" not in ${f}` });
+    }
+  }
+  // Changed locale files: en and es must define the same keys.
+  const dirs = new Set(files.filter(f => /^i18n\/.*\/messages-(en|es)\.json$/.test(f)).map(f => path.dirname(f)));
+  for (const dir of dirs) {
+    const [en, es] = LOCALES.map(l => load(path.join(root, dir, `messages-${l}.json`)));
+    if (!en || !es) { findings.push({ file: path.join(dir, `messages-${en ? 'es' : 'en'}.json`), message: 'missing or not valid JSON' }); continue; }
+    for (const k of en) if (!es.has(k)) findings.push({ file: path.join(dir, 'messages-es.json'), message: `missing key "${k}" (present in messages-en.json)` });
+    for (const k of es) if (!en.has(k)) findings.push({ file: path.join(dir, 'messages-en.json'), message: `missing key "${k}" (present in messages-es.json)` });
+  }
+  return findings;
+});

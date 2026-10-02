@@ -1,0 +1,25 @@
+{
+  "etag": "W/\"xnUR3GHVTllnWg2ajqMhcRFei_LVGCncLPmpQgc__8w\"",
+  "rows": [
+    {
+      "name": "My Uploads",
+      "scope": "account",
+      "source": {
+        "source": "claudeai"
+      },
+      "id": "marketplace_01NPNVTCJ4eW76F7o4GeNscQ",
+      "updated_at": "2026-09-21T17:59:45.717963Z"
+    },
+    {
+      "name": "anthropic-plugin-directory",
+      "display_name": "Anthropic Directory",
+      "scope": "default",
+      "source": {
+        "source": "claudeai"
+      },
+      "id": "marketplace_01VNB7JgJyYTuJiDfXSABKm3",
+      "updated_at": "2026-10-01T23:54:23.571757Z"
+    }
+  ],
+  "parserVersion": 2
+}

@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// axon-unlock-test: allow edits to ONE locked test file during GREEN/REFACTOR, with a recorded reason.
+// Settings put this command in permissions.ask, so the user approves every unlock.
+//   axon-unlock-test <test-file> --reason "<why the test is wrong>"
+import { unlockTest } from '../lib/state.mjs';
+import { option, rootOrExit, main } from '../lib/cli.mjs';
+
+const argv = process.argv.slice(2);
+main(() => {
+  const rel = unlockTest(rootOrExit(), argv[0], option(argv, 'reason'));
+  console.log(`Unlocked ${rel}. The reason is recorded in the task evidence.`);
+  return 0;
+});

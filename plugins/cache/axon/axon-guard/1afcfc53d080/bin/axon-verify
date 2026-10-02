@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+// axon-verify: the project's quality gate. Runs <repo>/.axon/config.json verify.commands, or else the package.json
+// scripts lint, typecheck and test when they exist. Records the result for axon-task (DONE) and the stop-gate.
+import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { projectConfig, recordVerify } from '../lib/state.mjs';
+import { rootOrExit, main } from '../lib/cli.mjs';
+
+function commandsFor(root) {
+  const configured = projectConfig(root).verify?.commands;
+  if (configured?.length) return configured;
+  const pkg = path.join(root, 'package.json');
+  if (!existsSync(pkg)) return [];
+  const scripts = JSON.parse(readFileSync(pkg, 'utf8')).scripts ?? {};
+  return [['lint', 'npm run lint'], ['typecheck', 'npm run typecheck'], ['test', 'npm test']].filter(([k]) => scripts[k]).map(([, c]) => c);
+}
+
+main(() => {
+  const root = rootOrExit();
+  const commands = commandsFor(root);
+  if (!commands.length) {
+    console.error('axon-verify: no verify commands. Add "verify": { "commands": [...] } to .axon/config.json, or lint/typecheck/test scripts to package.json');
+    recordVerify(root, false, []);
+    return 1;
+  }
+  const results = [];
+  for (const command of commands) {
+    const t0 = Date.now();
+    const r = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const ok = r.status === 0;
+    results.push({ command, exit: r.status, ms: Date.now() - t0 });
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${command}  (${Date.now() - t0} ms)`);
+    if (!ok) console.log(`${r.stdout ?? ''}${r.stderr ?? ''}`.trim().split('\n').slice(-30).join('\n'));
+  }
+  const ok = results.every(r => r.exit === 0);
+  recordVerify(root, ok, results);
+  console.log(ok ? `axon-verify: PASS (${results.length} check(s))` : 'axon-verify: FAIL');
+  return ok ? 0 : 1;
+});

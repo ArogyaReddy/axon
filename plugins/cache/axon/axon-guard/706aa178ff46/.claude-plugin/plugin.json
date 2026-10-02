@@ -1,0 +1,7 @@
+{
+  "name": "axon-guard",
+  "description": "Hooks that enforce the rules: TDD gates, test lock, evidence, guards",
+  "author": {
+    "name": "arog"
+  }
+}

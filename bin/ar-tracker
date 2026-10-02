@@ -1,0 +1,943 @@
+#!/usr/bin/env node
+/**
+ * ar-tracker — AROG Requirement-to-Outcome Tracker
+ *
+ * Commands:
+ *   ar-tracker            — terminal summary (default)
+ *   ar-tracker build      — regenerate tracker.html from tracker.json
+ *   ar-tracker show       — terminal summary
+ *   ar-tracker update <id> --status <s> --pct <n> [--add-working "x"] [--add-not-working "x"] [--add-pending "x"] [--remove-pending "x"]
+ *   ar-tracker session <id> --what "..." [--session-id <id>] [--evidence "..."] [--verified]
+ */
+
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+const TRACKER_DIR = path.join(os.homedir(), ".claude", "docs", "real-gaps");
+const TRACKER_JSON = path.join(TRACKER_DIR, "tracker.json");
+const TRACKER_HTML = path.join(TRACKER_DIR, "tracker.html");
+
+const STATUS_COLOR = {
+  done: "#22c55e",
+  partial: "#f59e0b",
+  in_progress: "#3b82f6",
+  not_started: "#6b7280",
+  blocked: "#ef4444",
+};
+const STATUS_LABEL = {
+  done: "DONE",
+  partial: "PARTIAL",
+  in_progress: "IN PROGRESS",
+  not_started: "NOT STARTED",
+  blocked: "BLOCKED",
+};
+
+function load() {
+  if (!fs.existsSync(TRACKER_JSON)) {
+    console.error("tracker.json not found: " + TRACKER_JSON);
+    process.exit(1);
+  }
+  return JSON.parse(fs.readFileSync(TRACKER_JSON, "utf8"));
+}
+
+function save(data) {
+  data.meta.last_updated = new Date().toISOString().slice(0, 10);
+  fs.writeFileSync(TRACKER_JSON, JSON.stringify(data, null, 2));
+}
+
+function overallPct(data) {
+  const r = data.requirements;
+  return r.length
+    ? Math.round(r.reduce((s, x) => s + x.completion_pct, 0) / r.length)
+    : 0;
+}
+
+// ── SHOW ────────────────────────────────────────────────────────────────────
+function cmdShow(data) {
+  const stops = loadStopFiles();
+  const unclassified = stops.filter((s) => !s.classified);
+  const pct = overallPct(data);
+  const bar =
+    "█".repeat(Math.floor(pct / 5)) + "░".repeat(20 - Math.floor(pct / 5));
+  console.log("\n╔══ " + data.meta.title + " ══╗");
+  console.log("║ " + data.meta.goal.slice(0, 78));
+  console.log(
+    "║ Overall: [" +
+      bar +
+      "] " +
+      pct +
+      "%   Last updated: " +
+      data.meta.last_updated,
+  );
+  console.log("╚" + "═".repeat(80) + "\n");
+  for (const r of data.requirements) {
+    const b =
+      "█".repeat(Math.floor(r.completion_pct / 10)) +
+      "░".repeat(10 - Math.floor(r.completion_pct / 10));
+    console.log(
+      "  " +
+        r.id.toUpperCase().padEnd(8) +
+        " [" +
+        b +
+        "] " +
+        String(r.completion_pct).padStart(3) +
+        "%  " +
+        STATUS_LABEL[r.status].padEnd(13) +
+        r.title,
+    );
+    if (r.pending.length) console.log("           ⏳ Next: " + r.pending[0]);
+    if (r.not_working.length)
+      console.log("           ❌ Gap:  " + r.not_working[0]);
+    console.log("");
+  }
+
+  if (unclassified.length > 0) {
+    console.log(
+      "  ── " +
+        unclassified.length +
+        " UNCLASSIFIED SESSION(S) — run classify ──",
+    );
+    for (const s of unclassified.slice(0, 5)) {
+      const hint = s.gap_hint
+        ? " [hint: " + s.gap_hint + " " + s.gap_hint_confidence + "]"
+        : "";
+      const req = s.req
+        ? s.req.raw.slice(0, 70).replace(/\n/g, " ")
+        : "(no req)";
+      console.log("  " + s.date + " [" + s.short_id + "] " + req + hint);
+      console.log(
+        "  → ar-tracker classify " +
+          (s.gap_hint || "<gap-id>") +
+          " " +
+          s.short_id,
+      );
+    }
+    console.log("");
+  }
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+function cmdUpdate(data, args) {
+  const id = args[0];
+  const r = data.requirements.find((x) => x.id === id);
+  if (!r) {
+    console.error(
+      "Unknown id: " +
+        id +
+        ". Options: " +
+        data.requirements.map((x) => x.id).join(", "),
+    );
+    process.exit(1);
+  }
+
+  const get = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : null;
+  };
+
+  const pct = get("--pct");
+  if (pct) r.completion_pct = parseInt(pct);
+  const status = get("--status");
+  if (status) r.status = status;
+  const aw = get("--add-working");
+  if (aw) r.working.push(aw);
+  const anw = get("--add-not-working");
+  if (anw) r.not_working.push(anw);
+  const ap = get("--add-pending");
+  if (ap) r.pending.push(ap);
+  const rp = get("--remove-pending");
+  if (rp)
+    r.pending = r.pending.filter(
+      (p) => !p.toLowerCase().includes(rp.toLowerCase()),
+    );
+
+  save(data);
+  console.log(
+    "Updated " + id + ": status=" + r.status + " pct=" + r.completion_pct + "%",
+  );
+}
+
+// ── SESSION ─────────────────────────────────────────────────────────────────
+function cmdSession(data, args) {
+  const id = args[0];
+  const r = data.requirements.find((x) => x.id === id);
+  if (!r) {
+    console.error("Unknown id: " + id);
+    process.exit(1);
+  }
+
+  const get = (flag) => {
+    const i = args.indexOf(flag);
+    return i !== -1 ? args[i + 1] : null;
+  };
+
+  r.sessions.push({
+    session_id: get("--session-id") || "manual-" + Date.now(),
+    date: new Date().toISOString().slice(0, 10),
+    what_done: get("--what") || "",
+    verified: args.includes("--verified"),
+    evidence: get("--evidence") || "",
+  });
+
+  save(data);
+  console.log("Session added to " + id);
+}
+
+// ── LOAD STOP FILES (auto-recorded sessions) ─────────────────────────────────
+function loadStopFiles() {
+  const base = path.join(os.homedir(), ".claude", "session-env");
+  const stops = [];
+  if (!fs.existsSync(base)) return stops;
+  const dirs = fs.readdirSync(base).filter((d) => /^\d{8}$/.test(d));
+  for (const dir of dirs) {
+    const full = path.join(base, dir);
+    try {
+      fs.readdirSync(full)
+        .filter((f) => f.startsWith("stop-") && f.endsWith(".json"))
+        .forEach((f) => {
+          try {
+            stops.push(JSON.parse(fs.readFileSync(path.join(full, f), "utf8")));
+          } catch {
+            /* skip corrupt */
+          }
+        });
+    } catch {
+      /* skip unreadable dir */
+    }
+  }
+  return stops;
+}
+
+// ── CLASSIFY ─────────────────────────────────────────────────────────────────
+function cmdClassify(data, args) {
+  const gapId = args[0];
+  const sessionId = args[1];
+  if (!gapId || !sessionId) {
+    console.error(
+      "Usage: ar-tracker classify <gap-id> <session-short-id|full-id>",
+    );
+    process.exit(1);
+  }
+  const r = data.requirements.find((x) => x.id === gapId);
+  if (!r) {
+    console.error("Unknown gap: " + gapId);
+    process.exit(1);
+  }
+
+  const base = path.join(os.homedir(), ".claude", "session-env");
+  let stopFile = null,
+    stopData = null;
+  const dirs = fs.existsSync(base)
+    ? fs.readdirSync(base).filter((d) => /^\d{8}$/.test(d))
+    : [];
+  outer: for (const dir of dirs) {
+    const full = path.join(base, dir);
+    for (const f of (fs.existsSync(full) ? fs.readdirSync(full) : []).filter(
+      (f) => f.startsWith("stop-"),
+    )) {
+      if (f.includes(sessionId.slice(0, 8))) {
+        stopFile = path.join(full, f);
+        stopData = JSON.parse(fs.readFileSync(stopFile, "utf8"));
+        break outer;
+      }
+    }
+  }
+  if (!stopData) {
+    console.error("No stop file found for session: " + sessionId);
+    process.exit(1);
+  }
+
+  const evidence = stopData.test_state
+    ? stopData.test_state.tests_ran
+      ? "Tests: " +
+        stopData.test_state.pass_count +
+        "P/" +
+        stopData.test_state.fail_count +
+        "F"
+      : "No tests ran"
+    : "No test data";
+
+  const existing = r.sessions.find(
+    (s) =>
+      s.session_id === stopData.session_id ||
+      s.session_id.startsWith(stopData.short_id),
+  );
+  if (existing) {
+    existing.evidence = evidence;
+    existing.verified =
+      (stopData.test_state && stopData.test_state.red_green_transition) ||
+      false;
+  } else {
+    r.sessions.push({
+      session_id: stopData.session_id,
+      date: stopData.date,
+      what_done: stopData.req
+        ? stopData.req.raw.slice(0, 200)
+        : "(no req captured)",
+      verified:
+        (stopData.test_state && stopData.test_state.red_green_transition) ||
+        false,
+      evidence,
+    });
+  }
+
+  stopData.classified = true;
+  stopData.classified_gap = gapId;
+  stopData.classified_at = new Date().toISOString();
+  fs.writeFileSync(stopFile, JSON.stringify(stopData, null, 2));
+
+  if (data.unclassified_sessions) {
+    data.unclassified_sessions = data.unclassified_sessions.filter(
+      (s) => !s.session_id.startsWith(stopData.short_id),
+    );
+  }
+
+  save(data);
+  console.log("Classified " + stopData.short_id + " → " + gapId);
+}
+
+// ── CLOSE ────────────────────────────────────────────────────────────────────
+function cmdClose(data, args) {
+  const sessionId = args[0];
+  const evidence = args[args.indexOf("--evidence") + 1] || "";
+  let found = false;
+
+  for (const r of data.requirements) {
+    for (const s of r.sessions) {
+      if (s.session_id === sessionId || s.session_id.startsWith(sessionId)) {
+        s.verified = true;
+        s.evidence = evidence || s.evidence;
+        found = true;
+        console.log("Marked verified: " + r.id + " / session " + s.session_id);
+      }
+    }
+  }
+
+  if (!found) {
+    console.error("Session not found: " + sessionId);
+    process.exit(1);
+  }
+  save(data);
+}
+
+// ── TRACE (Gap 5 — joined req + session + stop + gap classification) ────────
+const SESSIONS_JSONL = path.join(
+  os.homedir(),
+  ".claude",
+  "docs",
+  "sessions",
+  "sessions.jsonl",
+);
+
+function findSessionRow(sessionId) {
+  if (!fs.existsSync(SESSIONS_JSONL)) return null;
+  const lines = fs
+    .readFileSync(SESSIONS_JSONL, "utf8")
+    .split("\n")
+    .filter(Boolean);
+  let match = null;
+  for (const line of lines) {
+    try {
+      const row = JSON.parse(line);
+      if (
+        row.session_id &&
+        (row.session_id === sessionId || row.session_id.startsWith(sessionId))
+      ) {
+        match = row;
+      }
+    } catch {
+      /* skip corrupt line */
+    }
+  }
+  return match;
+}
+
+function loadReqFile(row, sessionId) {
+  if (row && row.req_file && fs.existsSync(row.req_file)) {
+    try {
+      return JSON.parse(fs.readFileSync(row.req_file, "utf8"));
+    } catch {
+      /* fall through to scan */
+    }
+  }
+  const base = path.join(os.homedir(), ".claude", "session-env");
+  if (!fs.existsSync(base)) return null;
+  const shortId = sessionId.slice(0, 8);
+  const dirs = fs.readdirSync(base).filter((d) => /^\d{8}$/.test(d));
+  for (const dir of dirs) {
+    const full = path.join(base, dir);
+    const files = (fs.existsSync(full) ? fs.readdirSync(full) : []).filter(
+      (f) => f.startsWith("req-") && f.includes(shortId),
+    );
+    if (files.length) {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(full, files[0]), "utf8"));
+      } catch {
+        /* skip corrupt file */
+      }
+    }
+  }
+  return null;
+}
+
+function loadStopFile(sessionId) {
+  const shortId = sessionId.slice(0, 8);
+  return (
+    loadStopFiles().find(
+      (s) =>
+        s.session_id === sessionId ||
+        s.short_id === shortId ||
+        (s.session_id && s.session_id.startsWith(shortId)),
+    ) || null
+  );
+}
+
+function findGapClassification(data, sessionId) {
+  const shortId = sessionId.slice(0, 8);
+  for (const r of data.requirements) {
+    const s = r.sessions.find(
+      (s) => s.session_id === sessionId || s.session_id.startsWith(shortId),
+    );
+    if (s) {
+      return {
+        gapId: r.id,
+        gapTitle: r.title,
+        verified: s.verified,
+        evidence: s.evidence,
+        whatDone: s.what_done,
+      };
+    }
+  }
+  return null;
+}
+
+function cmdTrace(data, args) {
+  const sessionId = args[0];
+  if (!sessionId) {
+    console.error("Usage: ar-tracker trace <session-id|short-id>");
+    process.exit(1);
+  }
+
+  const row = findSessionRow(sessionId);
+  if (!row) {
+    console.error("No session found in sessions.jsonl for: " + sessionId);
+    process.exit(1);
+  }
+
+  const req = loadReqFile(row, sessionId);
+  const stop = loadStopFile(sessionId);
+  const gap = findGapClassification(data, sessionId);
+
+  console.log("\n╔══ Trace: " + row.session_id + " ══╗");
+  console.log(
+    "Date/Time: " +
+      row.date +
+      " " +
+      row.time +
+      "   Workspace: " +
+      row.workspace +
+      "   Source: " +
+      row.source,
+  );
+  console.log(
+    "Turns: " + row.turns + "   Files written: " + row.files_written,
+  );
+
+  console.log("\n── Requirement ──");
+  if (req) {
+    console.log("  Action:  " + (req.action || "(not detected)"));
+    console.log("  Subject: " + (req.subject || "(not detected)"));
+    console.log(
+      "  Raw:     " + String(req.raw || "").slice(0, 200).replace(/\n/g, " "),
+    );
+    if (req.ticketId) {
+      console.log(
+        "  Ticket:  " +
+          req.ticketId +
+          (req.ticketSource === "local" ? " (local, no real ticket found)" : " (" + req.ticketSource + ")"),
+      );
+    }
+  } else {
+    console.log("  (none captured)");
+  }
+
+  console.log("\n── Session Outcome ──");
+  if (stop) {
+    console.log(
+      "  Status:  " + (stop.status || "(unknown)").toUpperCase(),
+    );
+    console.log(
+      "  Branch:  " +
+        (stop.branch || "(none)") +
+        (stop.pushed === true
+          ? " (pushed)"
+          : stop.pushed === false
+            ? " (NOT pushed)"
+            : " (push status unknown)"),
+    );
+    console.log(
+      "  Changed files: " + (stop.changed_files ? stop.changed_files.length : 0),
+    );
+    if (stop.test_state) {
+      console.log(
+        "  Tests: " +
+          (stop.test_state.tests_ran
+            ? stop.test_state.pass_count + "P/" + stop.test_state.fail_count + "F"
+            : "none ran"),
+      );
+    } else {
+      console.log("  Tests: no test-state data");
+    }
+  } else {
+    console.log("  (no stop stub found)");
+  }
+
+  console.log("\n── Traceability ──");
+  if (gap) {
+    console.log("  Gap:    " + gap.gapId + " (" + gap.gapTitle + ")");
+    console.log("  Status: " + (gap.verified ? "✓ VERIFIED" : "○ OPEN"));
+    if (gap.evidence) console.log("  Evidence: " + gap.evidence);
+  } else {
+    console.log(
+      "  Not yet classified to a gap — run: ar-tracker classify <gap-id> " +
+        sessionId.slice(0, 8),
+    );
+  }
+  console.log("");
+}
+
+// ── BUILD ────────────────────────────────────────────────────────────────────
+function cmdBuild(data) {
+  const stops = loadStopFiles();
+  const unclassified = stops.filter((s) => !s.classified);
+
+  const pct = overallPct(data);
+  const totalSessions =
+    data.requirements.reduce((s, r) => s + r.sessions.length, 0) +
+    unclassified.length;
+  const doneCount = data.requirements.filter((r) => r.status === "done").length;
+
+  function badge(status) {
+    const c = STATUS_COLOR[status] || "#6b7280";
+    const l = STATUS_LABEL[status] || status;
+    return (
+      '<span class="badge" style="background:' +
+      c +
+      "22;color:" +
+      c +
+      ";border:1px solid " +
+      c +
+      '44">' +
+      l +
+      "</span>"
+    );
+  }
+
+  function progressBar(pct, color, height) {
+    const h = height || 8;
+    return (
+      '<div class="bar" style="height:' +
+      h +
+      'px"><div class="bar-fill" style="width:' +
+      pct +
+      "%;background:" +
+      color +
+      ";height:" +
+      h +
+      'px"></div></div>'
+    );
+  }
+
+  function listItems(arr, icon, emptyMsg) {
+    if (!arr.length) return '<li class="empty">' + emptyMsg + "</li>";
+    return arr
+      .map((x) => "<li>" + icon + " " + escHtml(x) + "</li>")
+      .join("\n          ");
+  }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // Critical issues across all non-done gaps
+  const criticalIssues = data.requirements
+    .filter((r) => r.status !== "done")
+    .flatMap((r) =>
+      r.not_working.slice(0, 2).map((nw) => ({ id: r.id, text: nw })),
+    );
+
+  // Next actions per gap
+  const nextActions = data.requirements
+    .filter((r) => r.status !== "done" && r.pending.length > 0)
+    .map((r) => ({ id: r.id, text: r.pending[0] }));
+
+  const overviewCards = data.requirements
+    .map((r) => {
+      const c = STATUS_COLOR[r.status] || "#6b7280";
+      return (
+        '<div class="ov-card" onclick="show(\'' +
+        r.id +
+        '\')" title="Click to open ' +
+        r.id +
+        '">' +
+        '<div class="ov-id">' +
+        r.id +
+        "</div>" +
+        '<div class="ov-title">' +
+        escHtml(r.title.replace(/^Gap \d+ — /, "")) +
+        "</div>" +
+        '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:' +
+        c +
+        ';font-weight:700">' +
+        STATUS_LABEL[r.status] +
+        "</span><span>" +
+        r.completion_pct +
+        "%</span></div>" +
+        progressBar(r.completion_pct, c, 6) +
+        '<div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-top:6px"><span>' +
+        r.sessions.length +
+        " session" +
+        (r.sessions.length !== 1 ? "s" : "") +
+        "</span><span>" +
+        r.pending.length +
+        " pending</span></div>" +
+        "</div>"
+      );
+    })
+    .join("\n      ");
+
+  const gapPanels = data.requirements
+    .map((r) => {
+      const c = STATUS_COLOR[r.status] || "#6b7280";
+
+      const sessionsHtml =
+        r.sessions.length === 0
+          ? '<div class="empty-msg">No sessions recorded yet.</div>'
+          : r.sessions
+              .map(
+                (s) =>
+                  '<div class="session-row">' +
+                  '<div class="session-date">' +
+                  escHtml(s.date) +
+                  "</div>" +
+                  '<div class="session-body"><div class="session-what">' +
+                  escHtml(s.what_done) +
+                  "</div>" +
+                  (s.evidence
+                    ? '<div class="session-evidence">Evidence: ' +
+                      escHtml(s.evidence) +
+                      "</div>"
+                    : "") +
+                  "</div>" +
+                  '<div class="session-status ' +
+                  (s.verified ? "verified" : "open") +
+                  '">' +
+                  (s.verified ? "✓ VERIFIED" : "○ OPEN") +
+                  "</div>" +
+                  "</div>",
+              )
+              .join("\n        ");
+
+      return (
+        '<div id="panel-' +
+        r.id +
+        '" class="panel" style="display:none">' +
+        '<div class="gap-hdr"><div class="gap-title">' +
+        escHtml(r.title) +
+        "</div>" +
+        badge(r.status) +
+        "</div>" +
+        '<div class="problem">' +
+        escHtml(r.problem) +
+        "</div>" +
+        '<div class="prog-section">' +
+        '<div class="prog-hdr"><span>Completion</span><span class="prog-pct">' +
+        r.completion_pct +
+        "%</span></div>" +
+        progressBar(r.completion_pct, c, 10) +
+        "</div>" +
+        '<div class="section"><div class="section-title">Acceptance Criteria</div><ul class="crit-list">' +
+        r.acceptance_criteria
+          .map((x) => "<li>" + escHtml(x) + "</li>")
+          .join("") +
+        "</ul></div>" +
+        '<div class="three-col">' +
+        '<div class="col-card working"><div class="col-title">✅ Working</div><ul class="col-list">' +
+        listItems(r.working, "✅", "Nothing yet") +
+        "</ul></div>" +
+        '<div class="col-card not-working"><div class="col-title">❌ Not Working</div><ul class="col-list">' +
+        listItems(r.not_working, "❌", "None identified") +
+        "</ul></div>" +
+        '<div class="col-card pending"><div class="col-title">⏳ Pending</div><ul class="col-list">' +
+        listItems(r.pending, "⏳", "Nothing pending") +
+        "</ul></div>" +
+        "</div>" +
+        '<div class="section"><div class="section-title">Sessions (' +
+        r.sessions.length +
+        ")</div>" +
+        sessionsHtml +
+        "</div>" +
+        "</div>"
+      );
+    })
+    .join("\n\n  ");
+
+  const navTabs = data.requirements
+    .map((r) => {
+      const c = STATUS_COLOR[r.status] || "#6b7280";
+      return (
+        '<div class="nav-tab" id="tab-' +
+        r.id +
+        '" data-id="' +
+        r.id +
+        '" onclick="show(\'' +
+        r.id +
+        '\')" style="border-left:3px solid ' +
+        c +
+        '40">' +
+        r.title.split(" — ")[0] +
+        ' <span style="opacity:.6">' +
+        r.completion_pct +
+        "%</span></div>"
+      );
+    })
+    .join("\n  ");
+
+  const critHtml = criticalIssues
+    .map(
+      (x) =>
+        '<li><span style="color:#64748b;font-size:11px">[' +
+        x.id +
+        "]</span> " +
+        escHtml(x.text) +
+        "</li>",
+    )
+    .join("\n        ");
+
+  const nextHtml = nextActions
+    .map(
+      (x) =>
+        '<li><span style="color:#f59e0b;font-size:11px">[' +
+        x.id +
+        "]</span> " +
+        escHtml(x.text) +
+        "</li>",
+    )
+    .join("\n        ");
+
+  const pctColor = pct >= 80 ? "#22c55e" : pct >= 50 ? "#3b82f6" : "#f59e0b";
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escHtml(data.meta.title)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0e1117;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5}
+.header{background:linear-gradient(135deg,#1a1f2e 0%,#0e1117 100%);border-bottom:1px solid #2d3748;padding:24px 32px}
+.header-title{font-size:22px;font-weight:700;color:#f8fafc;margin-bottom:6px}
+.header-goal{color:#94a3b8;font-size:13px;max-width:820px;margin-bottom:10px}
+.trigger{background:#1e293b;border-left:3px solid #f59e0b;padding:8px 12px;font-size:12px;color:#cbd5e1;margin-bottom:16px;max-width:820px}
+.hdr-stats{display:flex;gap:24px;align-items:center;flex-wrap:wrap}
+.stat{display:flex;flex-direction:column}
+.stat-num{font-size:28px;font-weight:700;color:#f8fafc}
+.stat-lbl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
+.bar-wrap{flex:1;min-width:200px;max-width:400px}
+.bar-hdr{display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;margin-bottom:6px}
+.bar{height:10px;background:#1e293b;border-radius:5px;overflow:hidden}
+.bar-fill{height:100%;border-radius:5px;transition:width .3s}
+.nav{display:flex;gap:4px;padding:10px 32px;background:#0a0e18;border-bottom:1px solid #1e293b;flex-wrap:wrap;position:sticky;top:0;z-index:10}
+.nav-tab,.nav-overview{padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;border:1px solid transparent;transition:all .15s;white-space:nowrap;user-select:none}
+.nav-tab:hover,.nav-overview:hover{background:#1e293b}
+.nav-tab.active,.nav-overview.active{border-color:#3b82f6;background:#1e3a5f;color:#93c5fd}
+.content{padding:24px 32px;max-width:1100px}
+.panel{animation:fadein .15s}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.ov-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:24px}
+.ov-card{background:#111827;border:1px solid #1e293b;border-radius:8px;padding:16px;cursor:pointer;transition:border-color .15s}
+.ov-card:hover{border-color:#3b82f6}
+.ov-id{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+.ov-title{font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:10px;line-height:1.4}
+.badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+.section{margin-bottom:22px}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:600;margin-bottom:10px;border-bottom:1px solid #1e293b;padding-bottom:6px}
+.crit-list{list-style:none}
+.crit-list li{padding:5px 0;color:#cbd5e1;font-size:13px;border-bottom:1px solid #1e2333;display:flex;gap:8px}
+.crit-list li::before{content:'◻';color:#475569;flex-shrink:0}
+.crit-list li:last-child{border-bottom:none}
+.gap-hdr{display:flex;align-items:flex-start;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+.gap-title{font-size:20px;font-weight:700;color:#f8fafc;flex:1}
+.problem{background:#1a1f2e;border:1px solid #2d3748;border-left:3px solid #475569;padding:12px 16px;color:#94a3b8;font-size:13px;margin-bottom:18px;border-radius:0 6px 6px 0}
+.prog-section{margin-bottom:20px}
+.prog-hdr{display:flex;justify-content:space-between;margin-bottom:8px}
+.prog-pct{font-size:18px;font-weight:700;color:#f8fafc}
+.three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:22px}
+@media(max-width:768px){.three-col{grid-template-columns:1fr}}
+.col-card{background:#111827;border:1px solid #1e293b;border-radius:8px;padding:14px}
+.col-card.working{border-top:2px solid #22c55e}
+.col-card.not-working{border-top:2px solid #ef4444}
+.col-card.pending{border-top:2px solid #f59e0b}
+.col-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.working .col-title{color:#22c55e}
+.not-working .col-title{color:#ef4444}
+.pending .col-title{color:#f59e0b}
+.col-list{list-style:none}
+.col-list li{font-size:12px;color:#94a3b8;padding:4px 0;border-bottom:1px solid #1e293b;display:flex;gap:6px;align-items:flex-start}
+.col-list li:last-child{border-bottom:none}
+.empty{color:#374151;font-style:italic;font-size:12px}
+.empty-msg{color:#374151;font-style:italic;font-size:13px;padding:10px 0}
+.session-row{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:12px 14px;display:grid;grid-template-columns:100px 1fr auto;gap:12px;align-items:start;margin-bottom:8px}
+.session-date{font-size:11px;color:#64748b;padding-top:2px}
+.session-what{font-size:13px;color:#cbd5e1}
+.session-evidence{font-size:11px;color:#7fd1ff;margin-top:4px}
+.session-status{font-size:11px;font-weight:700;white-space:nowrap;padding-top:2px}
+.session-status.verified{color:#22c55e}
+.session-status.open{color:#f59e0b}
+.footer{text-align:right;font-size:11px;color:#374151;padding:16px 32px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-title">${escHtml(data.meta.title)}</div>
+  <div class="header-goal">${escHtml(data.meta.goal)}</div>
+  <div class="trigger">⚡ Trigger: ${escHtml(data.meta.trigger)}</div>
+  <div class="hdr-stats">
+    <div class="stat"><span class="stat-num">${pct}%</span><span class="stat-lbl">Overall</span></div>
+    <div class="stat"><span class="stat-num">${doneCount}/${data.requirements.length}</span><span class="stat-lbl">Gaps Closed</span></div>
+    <div class="stat"><span class="stat-num">${totalSessions}</span><span class="stat-lbl">Sessions</span></div>
+    <div class="bar-wrap">
+      <div class="bar-hdr"><span>Overall Progress</span><span>${pct}%</span></div>
+      <div class="bar"><div class="bar-fill" style="width:${pct}%;background:${pctColor}"></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="nav">
+  <div class="nav-overview active" id="tab-overview" onclick="show('overview')">Overview</div>
+  ${navTabs}
+</div>
+
+<div class="content">
+
+  <!-- OVERVIEW -->
+  <div id="panel-overview" class="panel">
+    <div class="ov-grid">
+      ${overviewCards}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Architecture Mismatch — Why This Exists</div>
+      <div class="problem">${escHtml(data.meta.architecture_mismatch)}</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Critical Issues Still Open</div>
+      <ul class="crit-list">
+        ${critHtml || "<li>None — all gaps closed.</li>"}
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Immediate Next Actions (one per gap)</div>
+      <ul class="crit-list">
+        \${nextHtml || "<li>Nothing pending.</li>"}
+      </ul>
+    </div>
+
+    \${unclassified.length > 0 ? \`
+    <div class="section">
+      <div class="section-title" style="color:#a78bfa">⚡ Auto-Recorded — Needs Classification (\${unclassified.length})</div>
+      \${unclassified.map(s => {
+        const hint  = s.gap_hint ? \` <span style="color:#a78bfa;font-size:11px">[hint: \${escHtml(s.gap_hint)} · \${escHtml(s.gap_hint_confidence)}]</span>\` : '';
+        const tests = s.test_state ? (s.test_state.tests_ran ? \`✅ \${s.test_state.pass_count}P/\${s.test_state.fail_count}F\` : '⚠️ no tests') : '—';
+        const req   = s.req ? escHtml(s.req.raw.slice(0, 120).replace(/\\n/g,' ')) : '(no req captured)';
+        return \`<div class="session-row" style="border-color:#3b1fa8">
+          <div class="session-date">\${escHtml(s.date)}<br><span style="font-size:10px;color:#7c3aed">\${escHtml(s.short_id)}</span></div>
+          <div><div class="session-what">\${req}\${hint}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px">Tests: \${tests} · Files: \${s.changed_files.length}</div>
+          <code style="font-size:11px;color:#7c3aed;display:block;margin-top:4px">ar-tracker classify \${escHtml(s.gap_hint || '&lt;gap-id&gt;')} \${escHtml(s.short_id)}</code></div>
+          <div class="session-status open">UNCLASSIFIED</div>
+        </div>\`;
+      }).join('')}
+    </div>\` : ''}
+  </div>
+
+  <!-- GAP PANELS -->
+  ${gapPanels}
+
+</div>
+
+<div class="footer">Generated ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC &nbsp;·&nbsp; <strong>ar-tracker build</strong> to refresh</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.panel').forEach(function(p){ p.style.display='none'; });
+  document.querySelectorAll('.nav-tab,.nav-overview').forEach(function(t){ t.classList.remove('active'); });
+  var panel = document.getElementById('panel-' + id);
+  if (panel) panel.style.display = 'block';
+  var tab = document.getElementById('tab-' + id);
+  if (tab) tab.classList.add('active');
+}
+// Show overview on load
+show('overview');
+</script>
+</body>
+</html>`;
+
+  fs.writeFileSync(TRACKER_HTML, html);
+  console.log("Tracker built: " + TRACKER_HTML);
+  console.log("Open: file://" + TRACKER_HTML);
+}
+
+// ── MAIN ─────────────────────────────────────────────────────────────────────
+const args = process.argv.slice(2);
+const cmd = args[0] || "show";
+const data = load();
+
+switch (cmd) {
+  case "show":
+    cmdShow(data);
+    break;
+  case "build":
+    cmdBuild(data);
+    break;
+  case "update":
+    cmdUpdate(data, args.slice(1));
+    cmdBuild(data);
+    break;
+  case "session":
+    cmdSession(data, args.slice(1));
+    cmdBuild(data);
+    break;
+  case "classify":
+    cmdClassify(data, args.slice(1));
+    cmdBuild(data);
+    break;
+  case "close":
+    cmdClose(data, args.slice(1));
+    cmdBuild(data);
+    break;
+  case "trace":
+    cmdTrace(data, args.slice(1));
+    break;
+  default:
+    console.log("Usage: ar-tracker [show|build|update|session|close|trace]");
+    console.log(
+      "  build                              — regenerate tracker.html",
+    );
+    console.log("  show                               — terminal summary");
+    console.log("  update <id> --pct 75 --status done — update a gap");
+    console.log('  session <id> --what "..." [--verified] [--evidence "..."]');
+    console.log('  close <session-id> --evidence "..."');
+    console.log(
+      "  trace <session-id|short-id>        — joined req+session+outcome view",
+    );
+}

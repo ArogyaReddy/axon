@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# =============================================================================
+# arog — open the AROG Dashboard, or check daemon status from the terminal.
+# =============================================================================
+# Usage:
+#   arog            — open the live dashboard in your default browser
+#   arog status     — terminal health check of all 4 background daemons
+#   arog on         — alias for arog-on  (start all daemons)
+#   arog off        — alias for arog-off (stop all daemons)
+# =============================================================================
+
+set -euo pipefail
+
+DASHBOARD_URL="http://127.0.0.1:47301"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+case "${1:-open}" in
+  open)
+    if command -v open &>/dev/null; then
+      open "$DASHBOARD_URL"
+      echo "arog: opened ${DASHBOARD_URL}"
+    else
+      echo "arog: ${DASHBOARD_URL} (open this in your browser)"
+    fi
+    ;;
+  status)
+    echo "AROG daemon status (launchctl):"
+    launchctl list 2>/dev/null | grep "com.arog" || echo "  (none registered)"
+    echo ""
+    if curl -sf --max-time 2 "${DASHBOARD_URL}/ping" >/dev/null 2>&1; then
+      echo "Dashboard: RESPONDING (${DASHBOARD_URL})"
+    else
+      echo "Dashboard: NOT RESPONDING — try: arog-on"
+    fi
+    ;;
+  on)
+    exec "${SCRIPT_DIR}/arog-on"
+    ;;
+  off)
+    exec "${SCRIPT_DIR}/arog-off"
+    ;;
+  *)
+    echo "Usage: arog [open|status|on|off]" >&2
+    exit 1
+    ;;
+esac

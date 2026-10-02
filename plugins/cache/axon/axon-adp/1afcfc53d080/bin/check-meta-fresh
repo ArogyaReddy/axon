@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+// check-meta-fresh (platform pattern 13, incident IFX-002): a change under meta/src/ needs a rebuilt meta/build/.
+// A stale build causes a silent C_AUTH_ERROR in STG with no compile-time signal.
+// Usage: check-meta-fresh [--base <ref>] [--all]
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import path from 'node:path';
+import { runChecker } from '../lib/changed.mjs';
+
+function newest(dir) {
+  let t = 0;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    t = Math.max(t, e.isDirectory() ? newest(p) : statSync(p).mtimeMs);
+  }
+  return t;
+}
+
+runChecker('check-meta-fresh', (root, files) => {
+  const src = files.filter(f => f.startsWith('meta/src/'));
+  if (!src.length) return [];
+  const fix = 'run: make meta && npm run load-meta -- FIT';
+  const build = path.join(root, 'meta', 'build');
+  if (!existsSync(build)) return [{ file: 'meta/build', message: `missing after meta/src changes; ${fix}` }];
+  const built = newest(build);
+  return src.filter(f => statSync(path.join(root, f)).mtimeMs > built)
+    .map(f => ({ file: f, message: `changed after the last meta build; ${fix}` }));
+});

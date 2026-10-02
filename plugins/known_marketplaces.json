@@ -1,0 +1,18 @@
+{
+  "claude-plugins-official": {
+    "source": {
+      "source": "github",
+      "repo": "anthropics/claude-plugins-official"
+    },
+    "installLocation": "/Users/arog/.claude/plugins/marketplaces/claude-plugins-official",
+    "lastUpdated": "2026-10-01T23:50:52.679Z"
+  },
+  "axon": {
+    "source": {
+      "source": "directory",
+      "path": "/Users/arog/.claude/.arog/axon"
+    },
+    "installLocation": "/Users/arog/.claude/.arog/axon",
+    "lastUpdated": "2026-10-01T23:13:52.739Z"
+  }
+}

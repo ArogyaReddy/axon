@@ -1,0 +1,610 @@
+#!/usr/bin/env python3
+"""
+meeting-notes -- Local, on/off meeting capture: record -> transcribe -> summarize -> email
+--------------------------------------------------------------------------------
+Records the Mac's system audio (via a BlackHole-backed Aggregate Device) plus
+mic, transcribes locally with whisper.cpp, summarizes via the Claude API,
+writes a markdown file, and emails it via the existing Outlook/AppleScript
+mechanism (bin/lib/send-meeting-email.mjs, reusing ar-pr-watch's tool).
+
+Usage:
+  meeting-notes start [--title "Standup"] [--auto-off-minutes 5]
+  meeting-notes stop
+  meeting-notes status
+
+One-time setup required first -- see docs/guides/meeting-notes-setup.md.
+Config (API key, recipient, device name) lives in bin/.meeting-notes.env
+(gitignored) -- copy bin/.meeting-notes.env.example and fill it in.
+"""
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+BIN_DIR = Path(__file__).resolve().parent
+CLAUDE_ROOT = BIN_DIR.parent
+STATE_PATH = BIN_DIR / ".meeting-notes-state.json"
+ENV_PATH = BIN_DIR / ".meeting-notes.env"
+WORK_ROOT = BIN_DIR / ".meeting-notes-work"
+OUTPUT_DIR = CLAUDE_ROOT / "docs" / "meeting-notes"
+EMAIL_SCRIPT = BIN_DIR / "lib" / "send-meeting-email.mjs"
+SUMMARIZE_SCRIPT = BIN_DIR / "lib" / "summarize-meeting.mjs"
+
+DEFAULT_AGGREGATE_DEVICE = "Meeting Notes Aggregate"
+DEFAULT_BLACKHOLE_DEVICE = "BlackHole 2ch"
+DEFAULT_WHISPER_MODEL = str(BIN_DIR / ".whisper-models" / "ggml-medium.en.bin")
+DEFAULT_AUTO_OFF_MINUTES = 5
+SILENCE_NOISE_DB = "-35dB"
+CLAUDE_MODEL = "claude-3-5-sonnet-20241022"  # update here if Anthropic deprecates this id
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+
+
+def load_env():
+    """Minimal .env parser -- KEY=VALUE lines, '#' comments, no extra deps."""
+    env = {}
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+def notify(title, message):
+    """Best-effort macOS notification -- never raises."""
+    try:
+        script = f'display notification "{message}" with title "{title}"'
+        subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    except Exception:
+        pass
+
+
+def log_event(line):
+    """Best-effort append to bin/.meeting-notes.log -- never raises. Needed
+    because stdout is invisible when meeting-notes is triggered via a
+    Shortcuts.app Quick Action (hotkey) instead of an interactive terminal --
+    confirmed real gap: a silent AI Gateway/email failure was otherwise
+    undiagnosable."""
+    try:
+        with open(BIN_DIR / ".meeting-notes.log", "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+_RESOLVED_SHELL_ENV = None
+
+
+def get_shell_env():
+    """Resolves PATH/http_proxy/https_proxy/no_proxy/NODE_EXTRA_CA_CERTS by
+    sourcing ~/.zshrc in a subshell, merged over os.environ. CONFIRMED real
+    gaps (reproduced and root-caused via real Shortcuts.app hotkey tests, not
+    guessed): meeting-notes is normally triggered via a Shortcuts.app Quick
+    Action (hotkey), which runs a non-interactive shell that does NOT source
+    .zshrc. That breaks THREE things silently: (1) `node` is nvm-installed,
+    only on PATH via .zshrc, so it's simply not found; (2) even with node
+    found, the corporate proxy vars (required to reach the external OAuth
+    token endpoint, login.microsoftonline.com) are missing, so the AI Gateway
+    call fails with a generic 'fetch failed'; (3) even with the proxy vars
+    restored, Node doesn't trust the corporate proxy's TLS-inspection
+    certificate without NODE_EXTRA_CA_CERTS (unlike curl/macOS, which use the
+    system keychain) -- failed with SELF_SIGNED_CERT_IN_CHAIN until this was
+    added too. Cached per-process. Never logs the resolved values -- the
+    proxy vars can contain embedded credentials."""
+    global _RESOLVED_SHELL_ENV
+    if _RESOLVED_SHELL_ENV is not None:
+        return _RESOLVED_SHELL_ENV
+    merged = dict(os.environ)
+    zshrc = Path.home() / ".zshrc"
+    if zshrc.exists():
+        try:
+            result = subprocess.run(
+                ["/bin/zsh", "-c", f"source {zshrc} >/dev/null 2>&1; env"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                wanted = {"PATH", "http_proxy", "https_proxy", "no_proxy",
+                          "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                          "NODE_EXTRA_CA_CERTS", "ADP_CA_BUNDLE"}
+                for line in result.stdout.splitlines():
+                    key, sep, value = line.partition("=")
+                    if sep and key in wanted:
+                        merged[key] = value
+        except Exception:
+            pass  # fall back to unmodified os.environ
+    _RESOLVED_SHELL_ENV = merged
+    return merged
+
+
+def slugify(text):
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
+    return text or "meeting"
+
+
+def read_state():
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text())
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def write_state(state):
+    STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
+def clear_state():
+    if STATE_PATH.exists():
+        STATE_PATH.unlink()
+
+
+def pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except Exception:
+        return False
+
+
+def find_avfoundation_device_index(device_name):
+    """Parses `ffmpeg -f avfoundation -list_devices` to find device_name's
+    index under the audio devices section. Raises RuntimeError if not found
+    (e.g. before the Aggregate Device is created, or before a reboot after
+    installing BlackHole)."""
+    result = subprocess.run(
+        ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+        capture_output=True, text=True,
+    )
+    in_audio_section = False
+    for line in result.stderr.splitlines():
+        if "AVFoundation audio devices" in line:
+            in_audio_section = True
+            continue
+        if in_audio_section:
+            match = re.search(r"\[(\d+)\]\s+(.*)", line)
+            if match and device_name.lower() in match.group(2).lower():
+                return match.group(1)
+    raise RuntimeError(
+        f"Could not find an audio device named '{device_name}'. Confirm the "
+        f"Aggregate Device was created in Audio MIDI Setup (see "
+        f"docs/guides/meeting-notes-setup.md) and that you rebooted after "
+        f"installing BlackHole."
+    )
+
+
+def parse_max_volume_db(ffmpeg_stderr_text):
+    """Extracts the volumedetect filter's max_volume reading (dB) from ffmpeg
+    stderr text. Returns None if that filter's output isn't present at all
+    (e.g. the probe errored before volumedetect ran)."""
+    match = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", ffmpeg_stderr_text)
+    if match:
+        return float(match.group(1))
+    if re.search(r"max_volume:\s*-inf\s*dB", ffmpeg_stderr_text):
+        return float("-inf")
+    return None
+
+
+def check_blackhole_signal(device_name=None, duration=5, threshold_db=-50.0):
+    """Isolated probe of BlackHole ALONE (not the combined Meeting Notes
+    Aggregate) -- detects whether real system audio is actually reaching it,
+    independent of whatever the mic happens to be picking up. Added 2026-07-30
+    (see meeting-notes-multi-output-silence-fix-073026.plan.md): the existing
+    watch_silence() silencedetect runs on the combined mic+BlackHole stream,
+    so it can't tell 'mic has ambient noise but BlackHole is dead silent'
+    (exactly what happened during the real 2026-07-30 meeting) apart from
+    'everything's fine' -- this closes that gap.
+    Returns True (signal present), False (confirmed silent), or None (the
+    probe itself failed to run -- e.g. device busy/not found -- logged but
+    never raised, since this is a safety-net check, not core recording
+    logic)."""
+    env = load_env()
+    name = device_name or env.get("MEETING_NOTES_BLACKHOLE_DEVICE", DEFAULT_BLACKHOLE_DEVICE)
+    try:
+        device_index = find_avfoundation_device_index(name)
+        result = subprocess.run(
+            ["ffmpeg", "-f", "avfoundation", "-i", f":{device_index}",
+             "-t", str(duration), "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=duration + 10,
+        )
+        max_volume = parse_max_volume_db(result.stderr)
+    except Exception as exc:
+        log_event(f"[{datetime.now().isoformat()}] check_blackhole_signal probe failed: {exc}")
+        return None
+    if max_volume is None:
+        log_event(
+            f"[{datetime.now().isoformat()}] check_blackhole_signal: no volumedetect "
+            f"output parsed (ffmpeg stderr tail: {result.stderr[-200:]!r})"
+        )
+        return None
+    return max_volume > threshold_db
+
+
+def do_start(title, auto_off_minutes):
+    state = read_state()
+    if state.get("recording") and pid_alive(state.get("ffmpeg_pid")):
+        print(f"Already recording (started {state.get('started_at')}, title: {state.get('title')!r}).")
+        return
+
+    env = load_env()
+    device_name = env.get("MEETING_NOTES_AGGREGATE_DEVICE", DEFAULT_AGGREGATE_DEVICE)
+    device_index = find_avfoundation_device_index(device_name)
+
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    work_dir = WORK_ROOT / session_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = work_dir / "recording.wav"
+    log_path = work_dir / "ffmpeg.log"
+
+    ffmpeg_cmd = [
+        "ffmpeg", "-f", "avfoundation", "-i", f":{device_index}",
+        "-af", f"silencedetect=noise={SILENCE_NOISE_DB}:d=2",
+        "-y", str(wav_path),
+    ]
+    log_file = open(log_path, "w")
+    ffmpeg_proc = subprocess.Popen(
+        ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=log_file, start_new_session=True,
+    )
+
+    state = {
+        "recording": True,
+        "title": title,
+        "started_at": datetime.now().isoformat(),
+        "ffmpeg_pid": ffmpeg_proc.pid,
+        "watcher_pid": None,
+        "work_dir": str(work_dir),
+        "wav_path": str(wav_path),
+        "log_path": str(log_path),
+        "auto_off_minutes": auto_off_minutes,
+    }
+    write_state(state)
+
+    watcher_proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "_watch",
+         "--auto-off-minutes", str(auto_off_minutes)],
+        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    state["watcher_pid"] = watcher_proc.pid
+    write_state(state)
+
+    print(f"Recording started: {title!r} (device: {device_name}, auto-off after {auto_off_minutes} min of silence)")
+    notify("Meeting Notes", f"Recording started: {title}")
+
+
+def run_whisper(wav_path, model_path):
+    if not Path(model_path).exists():
+        raise RuntimeError(
+            f"Whisper model not found at {model_path}. See "
+            f"docs/guides/meeting-notes-setup.md to download it."
+        )
+    out_prefix = str(Path(wav_path).with_suffix(""))
+    # --prompt biases recognition toward expected vocabulary (technical terms,
+    # product/tool names) that a general-purpose model tends to mis-hear --
+    # added 2026-07-30 after real accuracy feedback (rated ~65-70/100).
+    vocab_prompt = (
+        "Meeting notes for ADP e Platform engineering. Topics include LLM, "
+        "AI Gateway, agentic, whisper-cli, meeting notes, ADP, Bedrock, "
+        "OAuth, Claude, transcription, automation, regression testing."
+    )
+    subprocess.run(
+        ["whisper-cli", "-m", model_path, "-f", str(wav_path),
+         "-otxt", "-of", out_prefix, "-l", "en",
+         "--prompt", vocab_prompt],
+        check=True, capture_output=True,
+    )
+    txt_path = Path(out_prefix + ".txt")
+    if not txt_path.exists():
+        raise RuntimeError("whisper-cli did not produce a .txt transcript.")
+    return txt_path.read_text().strip()
+
+
+def call_claude(transcript, title, date_str, api_key):
+    prompt = f"""You are summarizing a work meeting transcript titled "{title}" from {date_str}.
+Produce clean markdown with exactly these sections, in this order:
+
+## Summary
+(2-4 sentence overview)
+
+## Key Discussion Points
+- bullet list
+
+## Highlights
+- bullet list of the most important moments/decisions
+
+## Action Items -- Me
+- bullet list (tasks for the note-taker, inferred from phrasing like "I will..." or direct assignment)
+
+## Action Items -- Team
+- bullet list (tasks mentioned for other people; best-effort, by name if mentioned -- no speaker diarization was available, so these are inferred from phrasing, not verified per-speaker audio)
+
+If a section has nothing relevant, write "None noted" under that heading rather than omitting it. Output ONLY the markdown, no preamble.
+
+Transcript:
+\"\"\"
+{transcript}
+\"\"\"
+"""
+    payload = json.dumps({
+        "model": CLAUDE_MODEL,
+        "max_tokens": 2000,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        CLAUDE_API_URL, data=payload, method="POST",
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["content"][0]["text"].strip()
+
+
+def call_ai_gateway(transcript, title, date_str):
+    """Summarizes via ADP's internal AI Gateway (bin/lib/summarize-meeting.mjs,
+    reusing master-tools/shared/ai-gateway.mjs -- same OAuth2/Bedrock mechanism
+    as ar-checkgate/adp-e-tool, already configured in master-tools/.env, no
+    personal API key needed). Returns None (not an exception) if the gateway
+    isn't configured or the call fails, so the caller can fall back."""
+    result = subprocess.run(
+        ["node", str(SUMMARIZE_SCRIPT), "--title", title, "--date", date_str],
+        input=transcript, capture_output=True, text=True, timeout=90,
+        env=get_shell_env(),
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    log_line = (
+        f"[{datetime.now().isoformat()}] AI Gateway summarization failed "
+        f"(exit {result.returncode}): {result.stderr.strip() or '(no stderr)'}"
+    )
+    print(log_line)
+    log_event(log_line)
+    return None
+
+
+def markdown_to_email_html(text):
+    """Minimal markdown -> HTML for email bodies: headers, bullets, blank
+    lines, real line breaks. Escapes HTML special chars FIRST so literal
+    <, >, & appearing in transcript/summary text can't be misread as markup,
+    then applies structural tags. Confirmed working 2026-07-30: Outlook's
+    compose window (HTML/WebView-based) renders real <br>/<b> as actual
+    formatting, not literal text -- unlike a plain '\\n', which this same
+    compose window collapses to a single space (see
+    format-outlook-applescript.mjs)."""
+    import html as html_module
+    lines_out = []
+    for line in text.split("\n"):
+        escaped = html_module.escape(line)
+        if escaped.startswith("## "):
+            lines_out.append(f"<br><b>{escaped[3:]}</b>")
+        elif escaped.startswith("# "):
+            lines_out.append(f"<br><b>{escaped[2:]}</b>")
+        elif escaped.startswith("- "):
+            lines_out.append(f"&nbsp;&nbsp;&bull; {escaped[2:]}")
+        elif escaped.strip() == "":
+            lines_out.append("")
+        else:
+            lines_out.append(escaped)
+    return "<br>".join(lines_out)
+
+
+def do_stop(triggered_by="user"):
+    state = read_state()
+    if not state.get("recording"):
+        print("Not currently recording.")
+        return
+
+    ffmpeg_pid = state.get("ffmpeg_pid")
+    if pid_alive(ffmpeg_pid):
+        os.kill(ffmpeg_pid, signal.SIGINT)  # graceful stop so the WAV finalizes properly
+        for _ in range(20):
+            if not pid_alive(ffmpeg_pid):
+                break
+            time.sleep(0.5)
+
+    title = state.get("title", "Meeting")
+    wav_path = state.get("wav_path")
+    started_at = state.get("started_at")
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    reason = "you clicked stop" if triggered_by == "user" else "5+ minutes of silence (auto-off)"
+    print(f"Recording stopped ({reason}). Transcribing...")
+
+    env = load_env()
+    model_path = env.get("MEETING_NOTES_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
+
+    try:
+        transcript = run_whisper(wav_path, model_path)
+    except Exception as exc:
+        clear_state()
+        print(f"ERROR during transcription: {exc}")
+        notify("Meeting Notes", f"Recording saved, but transcription failed: {exc}")
+        return
+
+    summary_md = None
+    try:
+        summary_md = call_ai_gateway(transcript, title, date_str)
+    except Exception as exc:
+        print(f"AI Gateway summarization failed to run ({exc}); trying fallback.")
+
+    if summary_md is None:
+        api_key = env.get("ANTHROPIC_API_KEY")
+        if api_key:
+            try:
+                summary_md = call_claude(transcript, title, date_str, api_key)
+            except Exception as exc:
+                print(f"WARNING: Claude summarization failed ({exc}); saving raw transcript only.")
+        else:
+            print("WARNING: AI Gateway unavailable and no ANTHROPIC_API_KEY set in bin/.meeting-notes.env; saving raw transcript only.")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    slug = slugify(title)
+    out_path = OUTPUT_DIR / f"{date_str}-{slug}.md"
+
+    body_sections = summary_md or "## Summary\n(Claude summarization unavailable -- see warning above.)"
+    auto_off_note = reason if triggered_by != "user" else "N/A (manual stop)"
+    markdown = (
+        f"# Meeting Notes: {title}\n\n"
+        f"**Date:** {date_str}\n"
+        f"**Started:** {started_at}\n"
+        f"**Auto-off triggered by:** {auto_off_note}\n\n"
+        f"---\n\n"
+        f"{body_sections}\n\n"
+        f"---\n\n"
+        f"## Raw Transcript\n\n"
+        f"{transcript}\n"
+    )
+    out_path.write_text(markdown)
+    print(f"Saved: {out_path}")
+
+    recipient = env.get("MEETING_NOTES_EMAIL_TO")
+    if recipient:
+        live = env.get("MEETING_NOTES_LIVE_EMAIL", "false").lower() == "true"
+        # Real HTML now (confirmed working 2026-07-30 via a live Outlook draft
+        # test: literal <br>/<b> render as actual formatting in this compose
+        # window). Deliberately excludes the raw transcript (can be long) to
+        # keep the email focused -- full transcript stays in the saved file,
+        # linked at the end.
+        email_plain = f"{title} ({date_str})\n\n{body_sections}\n\nFull notes (incl. raw transcript): {out_path}"
+        email_body = markdown_to_email_html(email_plain)
+        cmd = ["node", str(EMAIL_SCRIPT), "--subject", f"Meeting Notes: {title} -- {date_str}",
+               "--body", email_body, "--recipient", recipient, "--html"]
+        if live:
+            cmd.append("--live")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=get_shell_env())
+            output = (result.stdout or result.stderr).strip()
+        except Exception as exc:
+            output = f"Email skipped: failed to run ({exc})"
+        print(output)
+        if "skipped" in output.lower() or "error" in output.lower():
+            log_event(f"[{datetime.now().isoformat()}] {output}")
+    else:
+        print("No MEETING_NOTES_EMAIL_TO set in bin/.meeting-notes.env -- skipping email.")
+
+    clear_state()
+    notify("Meeting Notes", f"Notes ready: {out_path.name}")
+
+
+def do_status():
+    state = read_state()
+    if state.get("recording") and pid_alive(state.get("ffmpeg_pid")):
+        print(f"Recording: {state.get('title')!r} (started {state.get('started_at')})")
+    else:
+        print("Not recording.")
+
+
+BLACKHOLE_CHECK_FIRST_ITERATION = 2         # ~10s in -- fast feedback, but late
+                                             # enough not to false-positive before
+                                             # the meeting app/routing settles
+BLACKHOLE_CHECK_INTERVAL_ITERATIONS = 12    # ~60s cadence at the 5s poll below --
+                                             # catches a mid-meeting Output switch
+
+
+def watch_silence(auto_off_minutes):
+    """Runs as a detached background process spawned by do_start(). Tails the
+    ffmpeg log for silencedetect output and calls do_stop('silence') once
+    continuous silence exceeds auto_off_minutes. Exits once the session is no
+    longer recording (a manual stop already handled it). Also runs
+    check_blackhole_signal() early + periodically: the silencedetect above
+    only sees the COMBINED mic+BlackHole stream, so it can't catch 'mic has
+    ambient noise but BlackHole is dead silent' (2026-07-30 real-meeting
+    failure) -- this is a second, independent signal check for that gap."""
+    state = read_state()
+    log_path = state.get("log_path")
+    if not log_path or not Path(log_path).exists():
+        return
+
+    last_silence_start_at = None
+    seen_bytes = 0
+    iteration = 0
+    blackhole_warning_active = False
+    while True:
+        state = read_state()
+        if not state.get("recording"):
+            return
+
+        with open(log_path, "r", errors="ignore") as f:
+            f.seek(seen_bytes)
+            new_text = f.read()
+            seen_bytes = f.tell()
+
+        for line in new_text.splitlines():
+            if "silence_start" in line:
+                last_silence_start_at = time.time()
+            elif "silence_end" in line:
+                last_silence_start_at = None
+
+        if last_silence_start_at and (time.time() - last_silence_start_at) >= auto_off_minutes * 60:
+            do_stop(triggered_by="silence")
+            return
+
+        iteration += 1
+        due_for_check = (
+            iteration == BLACKHOLE_CHECK_FIRST_ITERATION
+            or iteration % BLACKHOLE_CHECK_INTERVAL_ITERATIONS == 0
+        )
+        if due_for_check:
+            signal_present = check_blackhole_signal()
+            if signal_present is False and not blackhole_warning_active:
+                blackhole_warning_active = True
+                warning = (
+                    "No audio detected from BlackHole -- meeting audio will NOT be "
+                    "captured (only mic, if anything). Check System Settings > Sound > "
+                    "Output includes BlackHole (e.g. the Multi-Output Device)."
+                )
+                notify("Meeting Notes - Capture Warning", warning)
+                log_event(f"[{datetime.now().isoformat()}] WARNING: {warning}")
+                print(f"WARNING: {warning}")
+            elif signal_present is True:
+                blackhole_warning_active = False
+
+        time.sleep(5)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="meeting-notes")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_start = sub.add_parser("start", help="Start recording a meeting")
+    p_start.add_argument("--title", default="Meeting")
+    p_start.add_argument("--auto-off-minutes", type=int, default=DEFAULT_AUTO_OFF_MINUTES)
+
+    sub.add_parser("stop", help="Stop recording and generate notes")
+    sub.add_parser("status", help="Show current recording status")
+
+    p_watch = sub.add_parser("_watch", help=argparse.SUPPRESS)
+    p_watch.add_argument("--auto-off-minutes", type=int, default=DEFAULT_AUTO_OFF_MINUTES)
+
+    args = parser.parse_args()
+
+    try:
+        if args.command == "start":
+            do_start(args.title, args.auto_off_minutes)
+        elif args.command == "stop":
+            do_stop(triggered_by="user")
+        elif args.command == "status":
+            do_status()
+        elif args.command == "_watch":
+            watch_silence(args.auto_off_minutes)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

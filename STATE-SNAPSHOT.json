@@ -1,0 +1,130 @@
+{
+  "generatedAt": "8/7/2026, 8:00:03 AM EST",
+  "project": "SBSRUNCORE",
+  "sprintName": null,
+  "sprintStats": null,
+  "tickets": [],
+  "prs": [],
+  "reviewingPrs": [],
+  "mergedPrs": [
+    {
+      "id": 14721,
+      "title": "Feature/pilot/26.0.0/ack tasks/arogya 260727 [SBSRUNCORE-150812]",
+      "createdOn": "2026-07-30T23:05:24.603Z",
+      "ticketKey": "SBSRUNCORE-150812",
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14721"
+    },
+    {
+      "id": 14577,
+      "title": "Feature/pilot/26.0.0/ack tasks/arogya 260727 [SBSRUNCORE-150593]",
+      "createdOn": "2026-07-28T15:01:13.744Z",
+      "ticketKey": "SBSRUNCORE-150593",
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14577"
+    },
+    {
+      "id": 14478,
+      "title": "organizationPolicy.update-current-summary-prepopulate.plan [SBSRUNCORE-150273]",
+      "createdOn": "2026-07-24T11:30:36.724Z",
+      "ticketKey": "SBSRUNCORE-150273",
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14478"
+    },
+    {
+      "id": 14391,
+      "title": "Feature/pilot/26.0.0/ack tasks/arogya 260721 [SBSRUNCORE-149945]",
+      "createdOn": "2026-07-22T21:02:51.046Z",
+      "ticketKey": "SBSRUNCORE-149945",
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14391"
+    },
+    {
+      "id": 14274,
+      "title": "ACK-TASKS - create.ctrl - Update i18n translations and test coverage [SBSRUNCORE-149681]",
+      "createdOn": "2026-07-20T13:04:54.192Z",
+      "ticketKey": "SBSRUNCORE-149681",
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14274"
+    },
+    {
+      "id": 14172,
+      "title": "ACK-TASKS - create.ctrl - Update i18n translations and test coverage [SBSRUNCORE-149633]",
+      "createdOn": "2026-07-16T14:24:33.316Z",
+      "ticketKey": "SBSRUNCORE-149633",
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14172"
+    },
+    {
+      "id": 14024,
+      "title": "Feature/pilot/26.0.0/ack tasks/policy create",
+      "createdOn": "2026-07-13T18:57:30.790Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/14024"
+    },
+    {
+      "id": 13363,
+      "title": "Feature/pilot/26.0.0/ack tasks/policy create",
+      "createdOn": "2026-06-25T20:06:30.962Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/13363"
+    },
+    {
+      "id": 12973,
+      "title": "Feature/pilot/26.0.0/ack tasks/policy create",
+      "createdOn": "2026-06-17T21:54:25.709Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/12973"
+    },
+    {
+      "id": 12817,
+      "title": "PR12428 - organizationPolicy.respond - Fix commit INSERT _Transaction fields + chat bubble UI",
+      "createdOn": "2026-06-15T17:32:21.951Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/12817"
+    },
+    {
+      "id": 12586,
+      "title": "Feature/pilot/26.0.0/ack tasks/policy create",
+      "createdOn": "2026-06-09T17:02:21.560Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/12586"
+    },
+    {
+      "id": 12428,
+      "title": "Feature/pilot/26.0.0/ack tasks/policy create",
+      "createdOn": "2026-06-04T21:16:30.570Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/12428"
+    },
+    {
+      "id": 11426,
+      "title": "Feature/pilot/26.0.0/ack tasks/policy create",
+      "createdOn": "2026-05-07T19:42:42.408Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/11426"
+    },
+    {
+      "id": 10596,
+      "title": "hr - organizationPolicy.create event and conversation",
+      "createdOn": "2026-04-13T13:43:20.034Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/10596"
+    }
+  ],
+  "declinedPrs": [
+    {
+      "id": 9370,
+      "title": "Feature/pilot/latest/recruiting/jobposting",
+      "createdOn": "2026-03-04T12:22:53.670Z",
+      "ticketKey": null,
+      "url": "https://bitbucket.es.ad.adp.com/projects/IL/repos/adp-e-product/pull-requests/9370"
+    }
+  ],
+  "todos": {
+    "open": [
+      "Try the new Suggestions tab (`/suggestions`) for a few days — is the 3-day PR-staleness threshold right, or too eager/lazy?",
+      "Run `ar-digest --since week` (ask in chat, or `node ~/.claude/master-tools/ar-digest/ar-digest.mjs --since week`) and see if it's actually useful as a Friday wrap-up",
+      "Decide G4 direction (Command Center drift — periodic re-verification habit vs. something more automated) — see `docs/plans/arog-vision-gaps-2026-08-02.plan.md`"
+    ],
+    "done": 0,
+    "total": 3
+  },
+  "tip": "`aurora DSQL` (FITDSQL env) uses different connection syntax than MySQL (DIT/FIT/STG). Always specify the env explicitly with `/ar-db-connect env:FITDSQL` — the wrong driver will silently return empty results.",
+  "jiraBaseUrl": "https://jira.service.tools-pi.com",
+  "previousSprints": []
+}

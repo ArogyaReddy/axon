@@ -1,0 +1,1596 @@
+#!/usr/bin/env python3
+"""
+capture-sessions — Zero-AI session capture for Claude Code CLI + GitHub Copilot
+────────────────────────────────────────────────────────────────────────────────
+Reads raw session files and writes human-readable .md logs.
+
+Sources covered:
+  1. Claude Code CLI (VS Code + VS Code Insiders + terminal)
+       ~/.claude/projects/{project}/*.jsonl  — full user+AI transcripts
+  2. GitHub Copilot (VS Code)
+       ~/Library/Application Support/Code/User/workspaceStorage/
+         */GitHub.copilot-chat/debug-logs/*/main.jsonl
+  3. GitHub Copilot (VS Code Insiders)
+       ~/Library/Application Support/Code - Insiders/User/workspaceStorage/
+         */GitHub.copilot-chat/debug-logs/*/main.jsonl
+
+Output:
+  ~/.claude/docs/sessions/YYYY-MM-DD-HHMM-{source}-{project}-{id[:8]}.md
+  ~/.claude/docs/sessions/sessions.jsonl  — one-line index per session
+
+State:
+  ~/.claude/cache/capture-sessions-state.json
+    Tracks {file_path: line_count} so unchanged sessions are skipped.
+
+Usage:
+  capture-sessions              # process new/updated sessions only
+  capture-sessions --backfill   # reprocess all sessions from scratch
+  capture-sessions --dry-run    # show what would be written without writing
+
+Automation:
+  Installed at ~/Library/LaunchAgents/com.arog.capture-sessions.plist
+  Fires on: workspaceStorage directory change, history.jsonl change, every 30 min.
+"""
+
+import os
+import sys
+import json
+import re
+import glob
+import fcntl
+import contextlib
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def strip_code_fences(text: str) -> str:
+    """Remove all fenced code blocks (``` ... ```) from text.
+
+    Mermaid diagrams, bash blocks, TypeScript snippets, etc. included verbatim
+    inside a session-log markdown file create nested code fences that break
+    every markdown renderer (VS Code, GitHub, Docusaurus).  Replace each block
+    with a one-line placeholder so readers know content was elided.
+    Applied to ALL AI-response text before it is written to the session log.
+    """
+    return re.sub(
+        r"```[^\n]*\n.*?```",
+        "[code/diagram block — see original chat]",
+        text,
+        flags=re.DOTALL,
+    )
+
+
+def sanitize_mermaid_blocks(text: str) -> str:
+    """Fix mermaid node labels so they render in VS Code markdown preview.
+
+    VS Code Copilot chat renders literal \\n sequences inside mermaid node
+    labels as line breaks.  VS Code's markdown preview (mermaid.js v9+) does
+    NOT — it treats \\n as a literal backslash-n and fails to parse the block.
+    Replacing \\n with <br/> (valid mermaid v9+ multi-line label syntax)
+    makes diagrams render correctly in both contexts.
+    """
+
+    def _fix_block(match: re.Match) -> str:
+        fence_open  = match.group(1)   # "```mermaid"
+        content     = match.group(2)   # diagram body
+        fence_close = match.group(3)   # "```"
+        content = content.replace("\\n", "<br/>")
+        return f"{fence_open}\n{content}{fence_close}"
+
+    return re.sub(
+        r"(```mermaid)\n(.*?)(```)",
+        _fix_block,
+        text,
+        flags=re.DOTALL,
+    )
+
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+HOME           = Path.home()
+OUT_DIR        = HOME / ".claude/docs/sessions"
+SESSION_ENV_DIR = HOME / ".claude/session-env"
+STATE_FILE     = HOME / ".claude/cache/capture-sessions-state.json"
+INDEX_FILE     = OUT_DIR / "sessions.jsonl"
+LOCK_FILE      = HOME / ".claude/cache/capture-sessions.lock"
+LOG_FILE       = HOME / ".claude/logs/capture-sessions.log"
+# VS Code's Copilot debug-log (main.jsonl) is NOT an append-only full
+# transcript — it rotates, evicting older lines once a size/age cap is hit.
+# Re-parsing it mid-session can silently return FEWER turns than a previous
+# run already captured (older turns — including any mermaid diagrams —
+# permanently gone from the raw source). SESSION_CACHE_DIR persists every
+# turn/file/command ever seen for a given session so a later rotation can
+# never erase content already written to a session log.
+SESSION_CACHE_DIR = HOME / ".claude/cache/session-turns"
+
+CLAUDE_PROJECTS = HOME / ".claude/projects"
+CLAUDE_HISTORY  = HOME / ".claude/history.jsonl"
+
+COPILOT_BASES = [
+    (HOME / "Library/Application Support/Code/User/workspaceStorage",          "vscode"),
+    (HOME / "Library/Application Support/Code - Insiders/User/workspaceStorage", "vscode-insiders"),
+]
+
+# ── Flags ──────────────────────────────────────────────────────────────────────
+BACKFILL = "--backfill" in sys.argv
+DRY_RUN  = "--dry-run"  in sys.argv
+FORCE    = "--force"    in sys.argv  # force-reprocess even if line count unchanged
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def log(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except:
+        pass
+
+def load_state() -> dict:
+    if BACKFILL or FORCE:
+        return {"processed": {}}
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except:
+            pass
+    return {"processed": {}}
+
+def save_state(state: dict):
+    if DRY_RUN:
+        return
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+def ts_to_dt(ts_ms: int) -> datetime:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone()
+
+def ts_fmt(ts_ms: int) -> str:
+    return ts_to_dt(ts_ms).strftime("%Y-%m-%d %H:%M")
+
+def ts_slug(ts_ms: int) -> str:
+    return ts_to_dt(ts_ms).strftime("%Y-%m-%d-%H%M")
+
+def sanitize(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]", "-", s)
+
+def line_count(path: Path) -> int:
+    try:
+        return sum(1 for _ in open(path, errors="ignore"))
+    except:
+        return 0
+
+@contextlib.contextmanager
+def index_lock():
+    """Serialize concurrent capture-sessions invocations across the whole
+    read-existing-ids -> append/patch -> save-state critical section.
+
+    FIXED 2026-07-23: without this, two invocations running at the same time
+    (a manual --backfill racing the LaunchAgent's own WatchPaths/:00/:30
+    trigger -- a NORMAL occurrence on this machine given ThrottleInterval=10,
+    not an edge case) can both call load_index_ids() before either has
+    written a brand-new session, and both append a duplicate line for it.
+    Reproduced for real: session bfb1ba11 got 2 identical sessions.jsonl rows
+    during a real --backfill run. An exclusive flock on a dedicated lock file
+    forces every invocation to fully finish (or wait) before the next one's
+    critical section starts, so existing_ids is always read after any
+    in-flight write completes.
+    """
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+def load_index_ids() -> set:
+    """Return set of session_ids already in the index to avoid duplicates."""
+    ids = set()
+    if INDEX_FILE.exists():
+        for line in INDEX_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                ids.add(json.loads(line)["session_id"])
+            except:
+                pass
+    return ids
+
+def find_req_file(session_id: str) -> str | None:
+    """Gap 1 linkage (added 2026-07-22): find the req-*.json captured for this
+    session (by ar-req-capture.js), if any, so sessions.jsonl can carry a
+    direct pointer instead of requiring a 2-hop join through stop-*.json.
+    Matches by the same 8-char session-id prefix convention used elsewhere
+    (e.g. ar-tracker-on-stop.js's shortId)."""
+    if not SESSION_ENV_DIR.exists():
+        return None
+    short_id = session_id[:8]
+    try:
+        for date_dir in sorted(SESSION_ENV_DIR.iterdir(), reverse=True):
+            if not date_dir.is_dir():
+                continue
+            for f in date_dir.glob("req-*.json"):
+                if short_id in f.name:
+                    return str(f)
+    except OSError:
+        pass
+    return None
+
+def find_stop_data(session_id: str) -> dict | None:
+    """Gap 2 linkage (added 2026-07-23): find the stop-*.json (written by
+    hooks/ar-tracker-on-stop.js) for this session, if any, so sessions.jsonl
+    can carry tests_run/pass_fail/git_pushed/branch fields -- previously
+    listed as missing in tracker.json/RUNBOOK.md. Matches by the same 8-char
+    session-id prefix convention as find_req_file(). Returns the parsed dict,
+    or None if no stop file exists yet or it's unreadable/corrupt."""
+    if not SESSION_ENV_DIR.exists():
+        return None
+    short_id = session_id[:8]
+    try:
+        for date_dir in sorted(SESSION_ENV_DIR.iterdir(), reverse=True):
+            if not date_dir.is_dir():
+                continue
+            for f in date_dir.glob("stop-*.json"):
+                if short_id in f.name:
+                    try:
+                        return json.loads(f.read_text())
+                    except (json.JSONDecodeError, OSError):
+                        return None
+    except OSError:
+        pass
+    return None
+
+def stop_fields(session_id: str) -> dict:
+    """Gap 2: build the tests_run/pass_fail/git_pushed/branch fields for a
+    sessions.jsonl entry from the session's stop-*.json, if one exists.
+    All four fields are None when no stop file is found yet (session hasn't
+    reached Stop, or predates Gap 5's status/branch/pushed fields) -- never
+    guessed as False/empty, matching the "null = unknown" convention used
+    elsewhere in this pipeline (see hooks/lib/compute-session-status.js)."""
+    data = find_stop_data(session_id)
+    if not data:
+        return {"tests_run": None, "pass_fail": None, "git_pushed": None, "branch": None}
+    test_state = data.get("test_state") or {}
+    tests_ran = test_state.get("tests_ran", False)
+    pass_fail = (
+        f"{test_state.get('pass_count', 0)}P/{test_state.get('fail_count', 0)}F"
+        if tests_ran
+        else None
+    )
+    return {
+        "tests_run": tests_ran,
+        "pass_fail": pass_fail,
+        "git_pushed": data.get("pushed"),
+        "branch": data.get("branch"),
+    }
+
+def append_index(entry: dict, existing_ids: set):
+    """Write (or update) this session's line in sessions.jsonl.
+
+    New session -> append a new line.
+    Already-seen session (re-parsed after more turns/edits, or after
+    ar-req-capture.js writes its req file sometime after the session first
+    appears) -> patch that one line in place, instead of silently discarding
+    the freshly computed entry. FIXED 2026-07-23: previously any repeat call
+    for a session_id already in existing_ids was a silent no-op, so
+    req_file/turns/files_written were frozen at whatever they were on first
+    capture forever, even after the real values changed on disk.
+    """
+    if DRY_RUN:
+        return
+    sid = entry["session_id"]
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if sid not in existing_ids:
+        with open(INDEX_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        existing_ids.add(sid)
+        return
+
+    if not INDEX_FILE.exists():
+        return
+    lines = INDEX_FILE.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if d.get("session_id") == sid:
+            lines[i] = json.dumps(entry)
+            INDEX_FILE.write_text("\n".join(lines) + "\n")
+            return
+
+
+def _turn_identity(turn: dict) -> str:
+    """Stable key for a turn, used to merge across rotated log windows."""
+    user_text = turn.get("text") or turn.get("user") or ""
+    return f"{turn.get('ts') or 0}|{user_text[:200]}"
+
+
+def load_session_cache(state_key: str) -> dict:
+    """Load the persisted full history for a session (turns/files/commands)
+    that survives raw-log rotation. Returns an empty skeleton if none yet."""
+    path = SESSION_CACHE_DIR / (sanitize(state_key) + ".json")
+    if path.exists():
+        try:
+            cached = json.loads(path.read_text())
+            cached.setdefault("turns", [])
+            cached.setdefault("files_read", [])
+            cached.setdefault("files_written", [])
+            cached.setdefault("commands", [])
+            return cached
+        except:
+            pass
+    return {"turns": [], "files_read": [], "files_written": [], "commands": []}
+
+
+def save_session_cache(state_key: str, cache: dict):
+    if DRY_RUN:
+        return
+    SESSION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = SESSION_CACHE_DIR / (sanitize(state_key) + ".json")
+    path.write_text(json.dumps(cache))
+
+
+def merge_session_data(cache: dict, fresh: dict) -> dict:
+    """Merge a freshly-parsed (possibly rotation-truncated) window into the
+    persisted full session history. Turns are matched by (ts, user-text)
+    identity; a turn already in the cache keeps whichever AI text is longer
+    (covers a response still streaming when last captured), UNLESS the
+    cached text is a known-broken salvage artifact (carries the "response
+    truncated by VS Code Copilot debug log" marker), in which case the
+    fresh text always wins even if shorter.
+
+    Why the marker check is required, not just "prefer longer": the old
+    debug-log-only salvage fallback could concatenate several separately-
+    truncated agent_response chunks (each with its own marker) into one
+    long-looking but broken string — sometimes LONGER than the real,
+    complete, single response the fixed parser now recovers from VS
+    Code's native chat-session store. A pure length comparison would then
+    keep the old broken text forever, since a length-based merge has no
+    way to know one side is corrupt regardless of which is longer — this
+    was observed for real on session 4619cc08 (an 8391-char broken cached
+    value outlived several backfills over a shorter, but correct, fresh
+    value). File/command lists are deduplicated, preserving first-seen
+    order."""
+    TRUNCATION_MARKER = "response truncated by VS Code Copilot debug log"
+    by_id  = {_turn_identity(t): dict(t) for t in cache["turns"]}
+    order  = [_turn_identity(t) for t in cache["turns"]]
+    for t in fresh.get("turns", []):
+        key = _turn_identity(t)
+        if key not in by_id:
+            by_id[key] = dict(t)
+            order.append(key)
+        else:
+            old_ai = by_id[key].get("ai", "") or ""
+            new_ai = t.get("ai", "") or ""
+            old_ai_broken = TRUNCATION_MARKER in old_ai
+            if new_ai and (old_ai_broken or len(new_ai) > len(old_ai)):
+                by_id[key]["ai"] = new_ai
+            old_text = by_id[key].get("text", "") or ""
+            new_text = t.get("text", "") or ""
+            if new_text and len(new_text) > len(old_text):
+                by_id[key]["text"] = new_text
+
+    merged_files_written = list(dict.fromkeys(cache["files_written"] + fresh.get("files_written", [])))
+    merged_files_read     = list(dict.fromkeys(cache["files_read"] + fresh.get("files_read", [])))
+    merged_commands       = list(dict.fromkeys(cache["commands"] + fresh.get("commands", [])))
+
+    return {
+        "turns":         [by_id[k] for k in order],
+        "files_written": merged_files_written,
+        "files_read":    merged_files_read,
+        "commands":      merged_commands,
+    }
+
+def _sanitize_mermaid_labels(mermaid_code: str) -> str:
+    """
+    LLM-authored Mermaid diagrams routinely include unquoted node labels
+    containing '{' or '}' — e.g. showing a file path placeholder like
+    `req-{id}.json` or a JSON example inline. Mermaid's grammar treats an
+    unescaped '{' as the start of a rhombus/decision-node shape
+    (`DIAMOND_START`); inside a plain `[bracket]` label that is a hard
+    PARSE ERROR, not a rendering quirk — confirmed directly against a real
+    Mermaid parser (mermaid.ink, v11.16.0): unquoted `REQ[... req-{id}.json]`
+    fails with "Parse error ... got 'DIAMOND_START'"; wrapping the same
+    label in double quotes (`REQ["... req-{id}.json"]`) parses and renders
+    correctly (HTTP 200, valid SVG) — that is the fix applied here.
+    Only touches labels containing '{' or '}' that are not already quoted;
+    leaves every other node label untouched.
+    """
+    def fix_label(m):
+        prefix, label = m.group(1), m.group(2)
+        if label.startswith('"') and label.endswith('"'):
+            return m.group(0)
+        if "{" in label or "}" in label:
+            safe = label.replace('"', "#quot;")
+            return f'{prefix}"{safe}"]'
+        return m.group(0)
+    return re.sub(r"(\w+\[)([^\[\]]*)\]", fix_label, mermaid_code)
+
+
+def _sanitize_all_mermaid_blocks(markdown: str) -> str:
+    """Apply _sanitize_mermaid_labels() inside every ```mermaid ... ``` fence
+    in a fully-rendered markdown document, leaving everything else untouched."""
+    def fix_block(m):
+        return "```mermaid\n" + _sanitize_mermaid_labels(m.group(1)) + "```"
+    return re.sub(r"```mermaid\n(.*?)```", fix_block, markdown, flags=re.DOTALL)
+
+
+def _strip_empty_code_fences(markdown: str) -> str:
+    """
+    Collapse EMPTY fenced code blocks (an opening ``` immediately followed
+    by a closing ``` with nothing but whitespace between) down to nothing.
+
+    Root cause: VS Code's native chat-session store (see
+    parse_native_chat_turns) represents each tool-call boundary in the
+    surrounding plain-text response parts with a literal ``` marker —
+    the actual tool call itself arrives as a separate toolInvocationSerialized
+    part, which is deliberately skipped when building the rendered AI text
+    (its real content is already tracked in the Files Written/Files
+    Read/Commands Run sections, not meant to be inlined). Once that part
+    is skipped, the surrounding text parts are joined directly, leaving an
+    opening ``` with nothing before its matching closing ``` — a
+    syntactically valid but CONTENT-FREE fenced code block. A markdown
+    previewer still renders the full-width syntax-highlighted background
+    for an empty code block, which looks like a solid black/blank box with
+    no text — confusing, and carries zero information (there was never any
+    code there to show). A real, non-empty code block (e.g. one the model
+    intentionally wrote inline) is untouched: the regex only matches when
+    there is NOTHING but whitespace between the two fences.
+    """
+    markdown = re.sub(r"```\s*```", "", markdown)
+    # Cosmetic cleanup only (not required for correctness): collapse the
+    # run of blank lines left behind where each empty fence used to sit.
+    return re.sub(r"\n{3,}", "\n\n", markdown)
+
+
+def write_md(path: Path, content: str):
+    content = _sanitize_all_mermaid_blocks(content)
+    content = _strip_empty_code_fences(content)
+    if DRY_RUN:
+        print(f"  [dry-run] would write: {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+# ── Claude Code transcript parsing ────────────────────────────────────────────
+
+def decode_content(content) -> str:
+    """Extract plain text from a Claude message content field."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", "").strip())
+        return "\n".join(parts).strip()
+    return ""
+
+def is_internal_user_msg(text: str) -> bool:
+    """Filter out Claude Code internal command/system messages."""
+    # XML-style internal tags injected by the shell executor
+    internal_xml_tags = [
+        "<local-command-caveat>",
+        "<local-command-stdout>",
+        "<command-name>",
+        "<command-message>",
+    ]
+    if any(tag in text for tag in internal_xml_tags):
+        return True
+    # Bracket-prefix internal status/protocol messages
+    # Note: "[Image:" is kept — it is real user-pasted content (screenshots)
+    internal_prefixes = [
+        "[structured-output-enforce]",   # AROG structured output protocol
+        "[Request interrupted by user]", # Claude Code session abort signal
+    ]
+    return any(text.startswith(p) for p in internal_prefixes)
+
+def parse_claude_transcript(jsonl_path: Path) -> dict | None:
+    """
+    Parse a Claude Code project JSONL transcript.
+
+    Each assistant 'turn' is spread across multiple sequential events:
+      - type=assistant / blocks=['thinking']  → skip (internal reasoning)
+      - type=assistant / blocks=['text']      → AI response text (CAPTURE)
+      - type=assistant / blocks=['tool_use']  → tool call (capture file ops)
+    We accumulate all text blocks across sequential assistant events before
+    the next user event.
+    """
+    turns: list[dict] = []
+    tool_uses: list[dict] = []
+    current_user: str | None = None
+    current_ai_texts: list[str] = []
+
+    def flush_turn():
+        """Push the buffered user+AI texts as a completed turn."""
+        nonlocal current_user, current_ai_texts
+        if current_user is not None:
+            ai = "\n\n".join(current_ai_texts) if current_ai_texts else ""
+            turns.append({"user": current_user, "ai": ai})
+        current_user = None
+        current_ai_texts = []
+
+    try:
+        with open(jsonl_path, errors="ignore") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    e = json.loads(raw)
+                except:
+                    continue
+
+                etype = e.get("type", "")
+                msg   = e.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                if etype == "user":
+                    raw_content = msg.get("content", "")
+                    user_text = decode_content(raw_content)
+                    if user_text and not is_internal_user_msg(user_text):
+                        # Real user message — flush previous turn, start new one
+                        flush_turn()
+                        current_user = user_text  # full — no truncation
+                    # else: tool_result wrapper or internal system message
+                    # → do NOT flush; keep accumulating AI text for the current turn
+
+                elif etype == "assistant":
+                    raw_content = msg.get("content", [])
+                    if not isinstance(raw_content, list):
+                        continue
+                    for block in raw_content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type", "")
+                        if btype == "text":
+                            txt = block.get("text", "").strip()
+                            if txt:
+                                current_ai_texts.append(txt)  # full — no truncation
+                        elif btype == "tool_use":
+                            tool_name = block.get("name", "")
+                            tool_input = block.get("input", {})
+                            if isinstance(tool_input, dict):
+                                fp = (
+                                    tool_input.get("filePath")
+                                    or tool_input.get("file_path")
+                                    or tool_input.get("path", "")
+                                )
+                                if fp:
+                                    tool_uses.append({"tool": tool_name, "file": fp})
+
+    except:
+        return None
+
+    flush_turn()  # flush last pending turn
+
+    if not turns:
+        return None
+
+    # Deduplicate file lists
+    WRITE_TOOLS = {
+        "replace_string_in_file", "create_file",
+        "multi_replace_string_in_file", "Write", "Edit",
+    }
+    READ_TOOLS = {"read_file", "Read"}
+
+    files_written = list(dict.fromkeys(
+        t["file"] for t in tool_uses if t["tool"] in WRITE_TOOLS
+    ))
+    files_read = list(dict.fromkeys(
+        t["file"] for t in tool_uses if t["tool"] in READ_TOOLS
+    ))
+
+    return {
+        "turns": turns,
+        "files_written": files_written,
+        "files_read": files_read,
+    }
+
+def build_session_summary(turns: list[dict], is_copilot: bool = False) -> str:
+    """
+    Build a concise ## Session Summary block from the conversation turns.
+    Extracts: topic sentences from each user turn + key AI actions.
+    Zero AI — pure string extraction.
+    """
+    if not turns:
+        return ""
+
+    lines = ["## Session Summary", ""]
+
+    # Topics: first sentence of each user message
+    lines.append("### Topics Covered")
+    lines.append("")
+    for i, turn in enumerate(turns, 1):
+        user_text = turn.get("user") or turn.get("text", "")
+        # First non-empty sentence
+        first_sentence = user_text.split("\n")[0].strip()[:200]
+        if first_sentence:
+            lines.append(f"{i}. {first_sentence}")
+    lines.append("")
+
+    # Files: unique list across all turns (Copilot path)
+    # For Claude Code, files_written is at the data level — handled in render
+
+    # Last AI response: what was the outcome?
+    last_ai = ""
+    for turn in reversed(turns):
+        ai = turn.get("ai", "")
+        if ai and len(ai.strip()) > 20:
+            # Show first 400 chars of last AI response as outcome
+            last_ai = ai.strip()[:400]
+            break
+
+    if last_ai:
+        # Strip ALL fenced code blocks before slicing — mermaid diagrams,
+        # bash/TypeScript blocks, etc. create nested ``` fences that break
+        # the session-log's own markdown structure in every renderer.
+        # strip_code_fences() removes them entirely, replacing each with a
+        # one-line placeholder.  We do this BEFORE the 400-char slice so no
+        # partial / truncated fence fragment can ever reach the output.
+        last_ai = strip_code_fences(last_ai)
+
+    if last_ai:
+        lines.append("### Last AI Response (outcome)")
+        lines.append("")
+        lines.append(last_ai)
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_claude_md(session_id: str, project: str, date_str: str, data: dict) -> str:
+    turns = data["turns"]
+    # Detect if session is still live: check if raw source file is still growing
+    # We use a simple heuristic: last turn has no AI response → likely still active
+    is_live = bool(turns) and not turns[-1].get("ai", "").strip()
+
+    lines = [
+        f"# Claude Code Session — {date_str}",
+        f"",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| **Tool** | Claude Code (CLI / VS Code / VS Code Insiders) |",
+        f"| **Project** | `{project}` |",
+        f"| **Session ID** | `{session_id}` |",
+        f"| **Date** | {date_str} |",
+        f"| **Turns** | {len(turns)} |",
+        f"| **Files Written** | {len(data['files_written'])} |",
+    ]
+    if is_live:
+        lines.append(f"| **Status** | ⚠️ Session may be live — rerun `ar-session-log` after it ends |")
+    lines += [f"",]
+
+    # Summary section
+    summary = build_session_summary(turns)
+    if summary:
+        lines.append(summary)
+
+    lines += [
+        f"## Conversation",
+        f"",
+    ]
+    for i, turn in enumerate(turns, 1):
+        lines.append(f"### Turn {i}")
+        lines.append(f"")
+        lines.append(f"**You:** {turn['user']}")
+        lines.append(f"")
+        if turn.get("ai"):
+            lines.append(f"**AI:**")
+            lines.append(f"")
+            lines.append(sanitize_mermaid_blocks(turn["ai"]))
+            lines.append(f"")
+
+    if data["files_written"]:
+        lines += ["---", "", "## Files Written / Edited", ""]
+        for f in data["files_written"]:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    if data["files_read"]:
+        lines += ["## Files Read (sample — first 20)", ""]
+        for f in data["files_read"][:20]:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    if is_live:
+        lines += [
+            "---",
+            "",
+            "> ⚠️ **Session may still be active.** This export was captured mid-session.",
+            "> The current turn is not included. Run `ar-session-log` again after the session ends.",
+            "",
+        ]
+
+    return "\n".join(lines)
+
+def process_claude_sessions(state: dict, existing_ids: set) -> tuple[int, int]:
+    """Process all Claude Code project transcripts."""
+    new_count = 0
+    upd_count = 0
+
+    if not CLAUDE_PROJECTS.exists():
+        return 0, 0
+
+    # Load timestamp index from history.jsonl
+    ts_map: dict[str, int] = {}  # session_id -> earliest timestamp (ms)
+    project_map: dict[str, str] = {}
+    if CLAUDE_HISTORY.exists():
+        try:
+            for raw in CLAUDE_HISTORY.read_text().splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    e = json.loads(raw)
+                    sid = e.get("sessionId", "")
+                    ts  = e.get("timestamp", 0)
+                    proj = e.get("project", "")
+                    if sid and ts:
+                        if sid not in ts_map or ts < ts_map[sid]:
+                            ts_map[sid] = ts
+                        if proj:
+                            project_map[sid] = proj
+                except:
+                    pass
+        except:
+            pass
+
+    for project_dir in CLAUDE_PROJECTS.iterdir():
+        if not project_dir.is_dir():
+            continue
+        project_name = project_dir.name  # encoded path, e.g. -Users-gadea--claude
+
+        # Decode project path: leading - = /, double -- = /
+        decoded = project_name.replace("--", "//").replace("-", "/").replace("//", "-")
+        # Cleaner: just use last component heuristic
+        readable_project = project_name.split("-")[-1] if "-" in project_name else project_name
+        if not readable_project:
+            readable_project = project_name[-8:]
+
+        for jsonl_file in project_dir.glob("*.jsonl"):
+            session_id = jsonl_file.stem
+            n = line_count(jsonl_file)
+            state_key = f"claude-code/{session_id}"
+            prev = state["processed"].get(state_key, 0)
+            if prev == n:
+                continue
+
+            data = parse_claude_transcript(jsonl_file)
+            if not data or not data["turns"]:
+                state["processed"][state_key] = n
+                continue
+
+            # Timestamps
+            ts_ms = ts_map.get(session_id)
+            if ts_ms:
+                date_str  = ts_fmt(ts_ms)
+                date_slug = ts_slug(ts_ms)
+            else:
+                mtime = jsonl_file.stat().st_mtime
+                dt = datetime.fromtimestamp(mtime).astimezone()
+                date_str  = dt.strftime("%Y-%m-%d %H:%M")
+                date_slug = dt.strftime("%Y-%m-%d-%H%M")
+
+            proj_display = project_map.get(session_id, project_dir.name)
+            proj_label   = Path(proj_display).name if proj_display else readable_project
+
+            filename = sanitize(f"{date_slug}-claude-code-{proj_label}-{session_id[:8]}") + ".md"
+            out_path = OUT_DIR / filename
+
+            md = render_claude_md(session_id, proj_display or project_dir.name, date_str, data)
+            write_md(out_path, md)
+
+            entry = {
+                "date":       date_str.split()[0],
+                "time":       date_str.split()[1] if " " in date_str else "?",
+                "source":     "claude-code",
+                "workspace":  proj_label,
+                "session_id": session_id,
+                "turns":      len(data["turns"]),
+                "files_written": len(data["files_written"]),
+                "log":        str(out_path),
+                "req_file":   find_req_file(session_id),
+                **stop_fields(session_id),
+            }
+            append_index(entry, existing_ids)
+            state["processed"][state_key] = n
+
+            if prev == 0:
+                new_count += 1
+            else:
+                upd_count += 1
+
+    return new_count, upd_count
+
+# ── Copilot session parsing ────────────────────────────────────────────────────
+
+def workspace_label(ws_base: Path, ws_id: str) -> str:
+    """Resolve workspace ID → project folder name."""
+    ws_json = ws_base / ws_id / "workspace.json"
+    if ws_json.exists():
+        try:
+            d = json.loads(ws_json.read_text())
+            folder = re.sub(r"^file://", "", d.get("folder", ""))
+            name = Path(folder).name
+            return name if name else ws_id[:8]
+        except:
+            pass
+    return ws_id[:8]
+
+_JSON_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+    '"': '"', "\\": "\\", "/": "/",
+}
+
+def _json_unescape(s: str) -> str:
+    """
+    Single-pass JSON string unescape — handles \\\\, \\", \\n, \\t, \\r, \\uXXXX.
+
+    Why this exists instead of chained .replace() calls: a naive
+    `.replace("\\n", "\n")` cannot distinguish an escaped backslash followed
+    by a literal 'n' (`\\\\n` in source → real chars: \\ \\ n → should decode
+    to `\\n`, i.e. one literal backslash + letter n) from the actual newline
+    escape (`\\n` → real chars: \\ n → should decode to one newline char).
+    Chained replace() gets this wrong and corrupts any text that itself
+    contains an escaped backslash immediately before an 'n', 't', etc. —
+    e.g. Mermaid diagrams using the literal `\\n` line-break marker inside
+    node labels get mangled into a lone backslash + a real newline, which
+    breaks the diagram syntax. This function decodes left-to-right like a
+    real JSON string parser, one escape pair at a time, so it never confuses
+    "escaped backslash + plain char" with "an escape sequence".
+    Tolerant of a truncated trailing input (e.g. a lone trailing backslash).
+    """
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt == "u" and i + 5 < n:
+                try:
+                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            if nxt in _JSON_ESCAPES:
+                out.append(_JSON_ESCAPES[nxt])
+                i += 2
+                continue
+            # Unknown/unsupported escape — keep the backslash literally.
+            out.append(c)
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _salvage_truncated_response_text(resp_raw: str) -> list[str]:
+    """
+    Fallback text extractor for when attrs.response fails json.loads().
+
+    Root cause: VS Code Copilot's debug-log writer truncates very long
+    agent_response payloads and appends a literal, non-JSON-escaped
+    "[truncated]" marker mid-string — this breaks the outer JSON encoding
+    (the string is left unterminated). Without this fallback, the entire
+    response is silently dropped (bare except → empty lists), even though
+    most of the real text is still present in resp_raw.
+
+    Recovers whatever readable "text"/"content" values it can via regex,
+    tolerating an unterminated trailing string. Best-effort only — the
+    recovered text itself may still be cut off mid-sentence.
+    """
+    salvaged: list[str] = []
+    # Match "type":"text","content":"...."  (or "text" key) — either a
+    # properly closed string, or one that runs to end-of-input (truncated).
+    pattern = re.compile(
+        r'"type"\s*:\s*"text"\s*,\s*"(?:content|text)"\s*:\s*"'
+        r'((?:\\.|[^"\\])*)'      # closed-string case
+        r'(?:"|$)',
+        re.DOTALL,
+    )
+    for m in pattern.finditer(resp_raw):
+        raw_txt = m.group(1)
+        if not raw_txt:
+            continue
+        txt = _json_unescape(raw_txt).strip()
+        if txt:
+            salvaged.append(txt)
+    return salvaged
+
+
+def _parse_agent_response_parts(resp_raw: str) -> tuple[list[str], list[dict], list[str]]:
+    """
+    Parse agent_response.attrs.response (double-encoded JSON string).
+    Returns: (text_parts, subagent_calls, tool_results)
+      text_parts    = list of assistant text strings
+      subagent_calls = [{"agent": name, "task": first 300 chars of prompt}]
+      tool_results  = list of tool result content strings
+    """
+    text_parts: list[str] = []
+    subagent_calls: list[dict] = []
+    tool_results: list[str] = []
+
+    try:
+        msgs = json.loads(resp_raw)
+    except:
+        salvaged = _salvage_truncated_response_text(resp_raw)
+        if salvaged:
+            salvaged[-1] = salvaged[-1] + (
+                "\n\n> ⚠️ **[response truncated by VS Code Copilot debug log — "
+                "partial recovery only]**"
+            )
+        return salvaged, [], []
+
+    if not isinstance(msgs, list):
+        msgs = [msgs]
+
+    for msg in msgs:
+        parts = msg.get("parts", []) if isinstance(msg, dict) else []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            ptype = p.get("type", "")
+            if ptype == "text":
+                # VS Code uses "text", VS Code Insiders uses "content"
+                txt = (p.get("text") or p.get("content") or "").strip()
+                if txt:
+                    text_parts.append(txt)  # full — no truncation
+            elif ptype == "tool_call":
+                name = p.get("name", "")
+                args = p.get("arguments", "")
+                if isinstance(args, str):
+                    try: args = json.loads(args)
+                    except: args = {}
+                if name == "runSubagent" and isinstance(args, dict):
+                    agent_name = args.get("agentName", "?")
+                    prompt = args.get("prompt", "")[:300]
+                    subagent_calls.append({"agent": agent_name, "task": prompt})
+                elif isinstance(args, dict):
+                    # Non-subagent tool call: collect file paths
+                    pass  # handled via dedicated tool_call events
+            elif ptype == "tool_result":
+                content = p.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        c.get("text", "") for c in content
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                if isinstance(content, str) and content.strip():
+                    tool_results.append(content.strip())  # full — no truncation
+
+    return text_parts, subagent_calls, tool_results
+
+
+def _chat_navigate_to_parent(root: dict, path: list):
+    """
+    Walk to the parent container of `path`, auto-vivifying missing dict/list
+    containers along the way (an int path segment implies its parent
+    container is a list, a str segment implies a dict) — this mirrors how
+    VS Code's own storage layer replays this op-log to rebuild the live
+    ChatModel in memory. Shared by both _chat_set_path (kind=1) and
+    _chat_append_path (kind=2) so the two ops navigate identically and only
+    differ in what they do once they reach the target.
+    Returns (parent_container, last_key).
+    """
+    cur = root
+    for i, key in enumerate(path[:-1]):
+        nxt_key = path[i + 1]
+        if isinstance(key, int):
+            while len(cur) <= key:
+                cur.append([] if isinstance(nxt_key, int) else {})
+            cur = cur[key]
+        else:
+            if key not in cur or cur[key] is None:
+                cur[key] = [] if isinstance(nxt_key, int) else {}
+            cur = cur[key]
+    return cur, path[-1]
+
+
+def _chat_set_path(root: dict, path: list, value):
+    """Apply one native chat-session op-log SET entry (kind=1):
+    root[path[0]][path[1]]... = value (a full overwrite at that path)."""
+    parent, last = _chat_navigate_to_parent(root, path)
+    if isinstance(last, int):
+        while len(parent) <= last:
+            parent.append(None)
+    parent[last] = value
+
+
+def _chat_append_path(root: dict, path: list, value):
+    """
+    Apply one native chat-session op-log APPEND entry (kind=2): EXTEND the
+    list (or concatenate the string) that already lives at `path` with
+    `value`, instead of overwriting it.
+
+    THE ACTUAL ROOT CAUSE of "response truncated by VS Code Copilot debug
+    log" recurring across many previous fix attempts: kind=2 means "grow
+    the existing container at this path" — e.g. push one more request onto
+    doc["requests"], or append N more streamed response-part dicts onto
+    doc["requests"][i]["response"]. A prior version of this parser routed
+    kind=2 through the exact same logic as kind=1 (a plain overwrite via
+    _chat_set_path), so every append silently REPLACED the entire existing
+    "requests" list with just the newly-appended item(s) instead of growing
+    it. Concretely, for a 12-turn session: appending request #2 executed
+    `doc["requests"] = [request_2]`, discarding request #1 from the live
+    replay entirely; the very next op then auto-vivified a brand-new,
+    unrelated dict at `doc["requests"][1]` (since index 1 no longer held
+    request #2's real object) and every subsequent "append more response
+    text" op for request #2 landed on THAT orphaned dict — never on the
+    object already captured by requestId in `by_id`. Net effect: `by_id`
+    kept request #2's *first* fragment only, so its reconstructed response
+    text came back empty, the (buggy) fallback silently kept the OLD
+    truncated/salvaged debug-log text instead, and the warning banner kept
+    reappearing no matter how many times the debug-log-side salvage logic
+    was patched — the real data loss was happening here, in the native-store
+    replay, not in the debug-log parsing this was supposed to work around.
+    """
+    parent, last = _chat_navigate_to_parent(root, path)
+    if isinstance(last, int):
+        while len(parent) <= last:
+            parent.append(None)
+        existing = parent[last]
+    else:
+        existing = parent.get(last)
+
+    if isinstance(existing, list) and isinstance(value, list):
+        existing.extend(value)
+    elif isinstance(existing, str) and isinstance(value, str):
+        parent[last] = existing + value
+    else:
+        # Nothing to grow yet (None) or an unexpected shape — initialize/
+        # overwrite rather than silently dropping the op.
+        parent[last] = value
+
+
+def parse_native_chat_turns(native_path: Path) -> list[dict] | None:
+    """
+    Recover the FULL, untruncated conversation from VS Code's native
+    chat-session store: workspaceStorage/<ws>/chatSessions/<sessionId>.jsonl
+
+    Root cause #1 this works around: the diagnostic debug log
+    (GitHub.copilot-chat/debug-logs/*/main.jsonl) truncates individual
+    agent_response field values mid-string (observed anywhere from ~700 to
+    ~5000 chars) and appends a literal, non-JSON-escaped "[truncated]"
+    marker — written by VS Code itself at log-write time. Once that happens
+    the rest of a long answer was simply never persisted to that file, so
+    no amount of smarter parsing of main.jsonl can recover it.
+
+    VS Code ALSO persists a separate, complete op-log used to restore the
+    actual Chat panel UI on reload. It is NOT capped the same way — full
+    multi-hundred-KB responses are present in full. Each line is:
+      {"kind": 0, "v": <full initial ChatModel snapshot>}         (first line)
+      {"kind": 1|2, "k": [path...], "v": <value>}                 (later lines)
+    Replaying the ops in file order reconstructs
+    doc["requests"][i] == {"requestId": ..., "message": {"text": ...}, "response": [...], ...}
+    with the COMPLETE response part list. Assistant markdown text lives in
+    response parts whose "kind" is absent (None) and whose "value" is a str;
+    other part kinds (toolInvocationSerialized, thinking, inlineReference)
+    are tool/reasoning metadata, not shown to the user, so they're skipped.
+
+    Defense-in-depth (kept even after fixing the real kind=2 bug above):
+    each request is tracked by its stable "requestId" (not by its transient
+    array index) in `by_id`, updated on every op under path ["requests",
+    ...]. `requests[i]` is only ever an in-progress live-replay position;
+    `by_id` is the durable, complete-as-of-last-op copy the renderer reads.
+
+    Returns None (never raises) on any parse failure so the caller can fall
+    back to the existing debug-log-based turns unchanged.
+    """
+    try:
+        doc: dict = {}
+        by_id: dict[str, dict] = {}  # requestId -> most-complete request dict seen
+
+        def _capture(reqs):
+            for req in reqs:
+                if isinstance(req, dict) and req.get("requestId"):
+                    by_id[req["requestId"]] = req
+
+        with open(native_path, errors="ignore") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    op = json.loads(raw)
+                except Exception:
+                    continue
+                kind = op.get("kind")
+                path = op.get("k")
+                val  = op.get("v")
+                if kind == 0:
+                    doc = val if isinstance(val, dict) else {}
+                    _capture(doc.get("requests", []) or [])
+                elif path and kind == 2:
+                    _chat_append_path(doc, path, val)
+                    if path[0] == "requests":
+                        _capture(doc.get("requests", []) or [])
+                elif path:
+                    _chat_set_path(doc, path, val)
+                    if path[0] == "requests":
+                        _capture(doc.get("requests", []) or [])
+
+        if not by_id:
+            return None
+
+        turns: list[dict] = []
+        for req in by_id.values():
+            user_text = ((req.get("message") or {}).get("text") or "").strip()
+            if not user_text:
+                continue
+            parts = req.get("response") or []
+            # Markdown file links the model writes (e.g. "[a/b.ts](a/b.ts)")
+            # are rendered by VS Code as a structured "inlineReference" part
+            # (path stored in "name"/"inlineReference.path") rather than as
+            # plain text — the surrounding prose stays a plain-text part, but
+            # the link target itself is NOT included in it. Concatenating
+            # only kind=None parts therefore leaves bare "``"/"****" gaps
+            # wherever a file link appeared. Re-inline each reference's
+            # readable name (backtick-wrapped) so the exported text reads
+            # naturally instead of dropping every file path mentioned.
+            ai_chunks: list[str] = []
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                pkind = p.get("kind")
+                if pkind is None and isinstance(p.get("value"), str):
+                    ai_chunks.append(p["value"])
+                elif pkind == "inlineReference":
+                    # Two observed shapes: a plain file reference has
+                    # "name" at the top level; a symbol reference (VS Code
+                    # resolved the span to a code symbol, e.g. a class or
+                    # a path-like phrase that matched a symbol name) nests
+                    # "name" one level deeper inside "inlineReference".
+                    ref = p.get("inlineReference") or {}
+                    name = p.get("name") or ref.get("name") or ref.get("path", "")
+                    if name:
+                        ai_chunks.append(f"`{name}`")
+            ai_text = "".join(ai_chunks).strip()
+            turns.append({"ts": req.get("timestamp"), "text": user_text, "ai": ai_text})
+        return turns or None
+    except Exception:
+        return None
+
+
+def parse_copilot_session(main_jsonl: Path, session_id: str, workspace: str, variant: str) -> dict | None:
+    """
+    Parse a Copilot debug-log session.
+
+    Copilot stores ALL LLM sub-calls as separate 'turns' in main.jsonl.
+    We only surface REAL user-visible turns:
+      - user_message events with non-empty content
+      - Paired with: direct text responses OR subagent routing info
+
+    AI response is in agent_response.attrs.response (JSON-encoded string of
+    message parts with type='text', 'tool_call', or 'tool_result').
+    """
+    events: list[dict] = []
+    try:
+        with open(main_jsonl, errors="ignore") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    events.append(json.loads(raw))
+                except:
+                    pass
+    except:
+        return None
+
+    if not events:
+        return None
+
+    start_ts = next((e["ts"] for e in events if "ts" in e), None)
+
+    # Track visible turns using turn_start / turn_end boundaries
+    turns: list[dict] = []
+    files_read: list[str] = []
+    files_written: list[str] = []
+    commands: list[str] = []
+
+    # Per-turn accumulation
+    in_turn     = False
+    cur_user    = ""
+    cur_ts: int | None = None
+    cur_texts: list[str]  = []
+    cur_subagents: list[dict] = []
+    cur_results: list[str] = []
+
+    WRITE_TOOLS = {
+        "replace_string_in_file", "create_file",
+        "multi_replace_string_in_file",
+    }
+
+    def flush_cop_turn():
+        nonlocal cur_user, cur_ts, cur_texts, cur_subagents, cur_results
+        if not cur_user:
+            return
+        # Build AI summary
+        ai_parts: list[str] = []
+        # 1. Any direct text (non-routing responses)
+        direct_texts = [t for t in cur_texts if t]
+        if direct_texts:
+            ai_parts.append("\n\n".join(direct_texts))
+        # 2. Subagent routing
+        if cur_subagents:
+            routing_lines = []
+            for s in cur_subagents:
+                routing_lines.append(f"**→ Routed to `{s['agent']}`**")
+                if s["task"]:
+                    routing_lines.append(f"> Task: {s['task']}")
+            ai_parts.append("\n".join(routing_lines))
+        # 3. Tool results (subagent output returned to main agent)
+        if cur_results:
+            result_block = "\n\n".join(cur_results[:3])
+            ai_parts.append(f"**Result returned:**\n{result_block}")
+        turns.append({
+            "ts":   cur_ts,
+            "text": cur_user,
+            "ai":   "\n\n".join(ai_parts) if ai_parts else "",
+        })
+        cur_user = ""
+        cur_ts = None
+        cur_texts = []
+        cur_subagents = []
+        cur_results = []
+
+    for e in events:
+        etype = e.get("type", "")
+        attrs = e.get("attrs", {}) or {}
+        ts    = e.get("ts")
+
+        if etype == "turn_start":
+            in_turn = True
+
+        elif etype == "turn_end":
+            in_turn = False
+
+        elif etype == "user_message":
+            # Real user message — flush previous turn, start new one.
+            # FILTER: terminal notification events look like:
+            #   "[Terminal {uuid} notification: command completed. The terminal has been cleaned up.]\nTerminal output:\n..."
+            # These are tool results sent back via user_message (VS Code Copilot convention).
+            # They are NOT real human messages — skip them entirely.
+            flush_cop_turn()
+            content = attrs.get("content", "").strip()
+            if content and not (
+                content.startswith("[Terminal ") and "notification:" in content
+            ):
+                cur_user = content
+                cur_ts   = ts
+
+        elif etype == "agent_response":
+            resp_raw = attrs.get("response", "")
+            if resp_raw:
+                t_parts, t_subagents, t_results = _parse_agent_response_parts(resp_raw)
+                cur_texts.extend(t_parts)
+                cur_subagents.extend(t_subagents)
+                cur_results.extend(t_results)
+
+        elif etype == "tool_call":
+            # tool_call events: name is at the TOP LEVEL of the event (not attrs).
+            # args are in attrs.args as a JSON-encoded string (needs json.loads).
+            name = e.get("name", "")
+            args_raw = attrs.get("args", "")
+            try:
+                inp = json.loads(args_raw) if isinstance(args_raw, str) and args_raw else {}
+            except:
+                inp = {}
+            if not isinstance(inp, dict):
+                inp = {}
+            fp = inp.get("filePath") or inp.get("file_path") or inp.get("path", "")
+            if name == "read_file" and fp:
+                files_read.append(fp)
+            elif name in WRITE_TOOLS and fp:
+                files_written.append(fp)
+            elif name == "run_in_terminal":
+                cmd = inp.get("command", "")
+                if cmd:
+                    commands.append(cmd[:120])
+
+    flush_cop_turn()  # flush last turn
+
+    if not turns:
+        # Some Copilot sessions only have a tiny debug log stub while the
+        # real conversation lives entirely in workspaceStorage/<ws>/chatSessions.
+        # Fall back to the native store directly so those sessions are still
+        # exported instead of being silently skipped.
+        try:
+            ws_entry = main_jsonl.parents[3]
+            native_path = ws_entry / "chatSessions" / f"{session_id}.jsonl"
+            if native_path.exists():
+                native_turns = parse_native_chat_turns(native_path)
+                if native_turns:
+                    first_ts = next((t.get("ts") for t in native_turns if t.get("ts")), None)
+                    return {
+                        "session_id": session_id,
+                        "source": f"copilot/{variant}",
+                        "workspace": workspace,
+                        "start_ts": first_ts,
+                        "turns": native_turns,
+                        "files_read": [],
+                        "files_written": [],
+                        "commands": [],
+                    }
+        except Exception:
+            pass
+        return None
+
+    # Prefer the native chat-session store for turn text — it holds the
+    # complete, untruncated conversation (see parse_native_chat_turns
+    # docstring for why the debug log alone is lossy for long responses).
+    # main_jsonl = <ws_entry>/GitHub.copilot-chat/debug-logs/<session_id>/main.jsonl
+    # so ws_entry is 3 levels up.
+    try:
+        ws_entry = main_jsonl.parents[3]
+        native_path = ws_entry / "chatSessions" / f"{session_id}.jsonl"
+        if native_path.exists():
+            native_turns = parse_native_chat_turns(native_path)
+            # Match turns by user-message text instead of requiring the two
+            # turn COUNTS to be identical. The debug log's turn segmentation
+            # (user_message events, minus filtered-out fake terminal-
+            # notification messages) and the native store's request list
+            # (one per distinct requestId) are built by two independent
+            # algorithms and routinely disagree in count on real sessions
+            # (e.g. a retried/cancelled request adds one extra native
+            # entry) — requiring exact count parity discarded a fully
+            # correct, available fix for the ENTIRE session whenever the
+            # two counts differed by even one, which in this workspace's
+            # own session history was most sessions, not a rare edge case.
+            #
+            # The user's own message text is normally a reliable join key
+            # (verbatim what they typed), but VS Code's debug-log writer
+            # truncation bug is NOT limited to agent_response — a very
+            # long user_message value gets the same treatment (cut off
+            # mid-string with a literal, unescaped "[truncated]" suffix).
+            # _join_key() strips that marker so a truncated debug-log copy
+            # still matches its complete native counterpart; the match
+            # loop then accepts either an exact match or a prefix match
+            # (whichever side is truncated is a prefix of the complete
+            # one). Each native turn is consumed at most once (`remaining`
+            # list), so repeated identical/near-identical user messages
+            # (e.g. two separate "yes" turns) still pair up in
+            # chronological order instead of all matching the first one.
+            if native_turns:
+                def _join_key(s):
+                    s = (s or "").strip()
+                    marker = "[truncated]"
+                    return s[: -len(marker)] if s.endswith(marker) else s
+
+                remaining = [(_join_key(nt.get("text")), nt) for nt in native_turns]
+                for turn in turns:
+                    key = _join_key(turn.get("text"))
+                    if not key:
+                        continue
+                    match_i = next(
+                        (i for i, (nkey, _nt) in enumerate(remaining)
+                         if nkey and (nkey == key or nkey.startswith(key) or key.startswith(nkey))),
+                        None,
+                    )
+                    if match_i is None:
+                        continue
+                    _, nt = remaining.pop(match_i)
+                    if nt.get("text"):
+                        turn["text"] = nt["text"]
+                    if nt.get("ai"):
+                        turn["ai"] = nt["ai"]
+    except Exception:
+        pass
+
+    return {
+        "session_id":    session_id,
+        "source":        f"copilot/{variant}",
+        "workspace":     workspace,
+        "start_ts":      start_ts,
+        "turns":         turns,
+        "files_read":    list(dict.fromkeys(files_read)),
+        "files_written": list(dict.fromkeys(files_written)),
+        "commands":      commands,
+    }
+
+def render_copilot_md(s: dict) -> str:
+    date_str     = ts_fmt(s["start_ts"]) if s["start_ts"] else "unknown"
+    variant_label = "VS Code Insiders" if "insiders" in s["source"] else "VS Code"
+
+    # Detect live session: check if the last turn has no AI response
+    is_live = bool(s["turns"]) and not s["turns"][-1].get("ai", "").strip()
+
+    lines = [
+        f"# Copilot Session — {date_str}",
+        f"",
+        f"| Field | Value |",
+        f"|-------|-------|",
+        f"| **Tool** | GitHub Copilot ({variant_label}) |",
+        f"| **Workspace** | `{s['workspace']}` |",
+        f"| **Session ID** | `{s['session_id']}` |",
+        f"| **Date** | {date_str} |",
+        f"| **Turns** | {len(s['turns'])} |",
+        f"| **Files Written** | {len(s['files_written'])} |",
+        f"| **Commands Run** | {len(s['commands'])} |",
+    ]
+    if is_live:
+        lines.append(f"| **Status** | ⚠️ Session may be live — rerun `ar-session-log` after it ends |")
+    lines.append(f"")
+
+    # Summary section
+    # Convert Copilot turn format to common format for build_session_summary
+    common_turns = [{"user": t.get("text",""), "ai": t.get("ai","")} for t in s["turns"]]
+    summary = build_session_summary(common_turns, is_copilot=True)
+    if summary:
+        lines.append(summary)
+
+    lines += [
+        f"## Conversation",
+        f"",
+    ]
+
+    for i, turn in enumerate(s["turns"], 1):
+        ts_str = ts_fmt(turn["ts"]) if turn.get("ts") else ""
+        header = f"### Turn {i}" + (f" — {ts_str}" if ts_str else "")
+        lines.append(header)
+        lines.append("")
+        lines.append(f"**You:** {turn['text']}")
+        lines.append("")
+        if turn.get("ai"):
+            lines.append(f"**AI:**")
+            lines.append("")
+            lines.append(sanitize_mermaid_blocks(turn["ai"]))
+            lines.append("")
+
+    if s["files_written"]:
+        lines += ["---", "", "## Files Written / Edited", ""]
+        for f in s["files_written"]:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    if s["files_read"]:
+        lines += ["## Files Read (sample — first 20)", ""]
+        for f in s["files_read"][:20]:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    if s["commands"]:
+        lines += ["## Commands Run", ""]
+        for cmd in s["commands"][:15]:
+            lines.append(f"- `{cmd}`")
+        lines.append("")
+
+    if is_live:
+        lines += [
+            "---",
+            "",
+            "> ⚠️ **Session may still be active.** This export was captured mid-session.",
+            "> The current turn is not included. Run `ar-session-log` again after the session ends.",
+            "",
+        ]
+
+    return "\n".join(lines)
+
+def process_copilot_sessions(state: dict, existing_ids: set) -> tuple[int, int]:
+    """Process Copilot sessions from both VS Code variants."""
+    new_count = 0
+    upd_count = 0
+
+    for ws_base, variant in COPILOT_BASES:
+        if not ws_base.exists():
+            continue
+
+        for ws_entry in ws_base.iterdir():
+            if not ws_entry.is_dir():
+                continue
+            debug_logs = ws_entry / "GitHub.copilot-chat" / "debug-logs"
+            if not debug_logs.exists():
+                continue
+            ws_name = workspace_label(ws_base, ws_entry.name)
+
+            for session_dir in debug_logs.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                main_jsonl = session_dir / "main.jsonl"
+                if not main_jsonl.exists():
+                    continue
+
+                session_id = session_dir.name
+                n = line_count(main_jsonl)
+                state_key = f"copilot/{variant}/{session_id}"
+                prev = state["processed"].get(state_key, 0)
+                if prev == n:
+                    continue
+
+                fresh = parse_copilot_session(main_jsonl, session_id, ws_name, variant)
+                if not fresh:
+                    # Parse failed (empty session or log was rotated by VS Code).
+                    # Keep state at OLD value so we retry if more events arrive.
+                    # Do NOT overwrite existing session .md file.
+                    continue
+
+                # main.jsonl rotates — merge this window into the persisted
+                # full history so turns/files/commands already captured can
+                # never be dropped by a later, smaller parse window.
+                cache = load_session_cache(state_key)
+                data  = merge_session_data(cache, fresh)
+                save_session_cache(state_key, data)
+
+                # Filename must stay stable across runs. Deriving it from the
+                # CURRENT parse's start_ts breaks that once VS Code rotates
+                # main.jsonl (start_ts drifts forward as older lines are
+                # evicted), creating a new orphaned file each time instead of
+                # updating the original. Use the earliest ts in the merged,
+                # persisted turn history instead — first-seen never changes.
+                first_ts = next((t["ts"] for t in data["turns"] if t.get("ts")), None)
+                if first_ts:
+                    date_slug = ts_slug(first_ts)
+                    date_str  = ts_fmt(first_ts)
+                else:
+                    mtime = main_jsonl.stat().st_mtime
+                    dt = datetime.fromtimestamp(mtime).astimezone()
+                    date_slug = dt.strftime("%Y-%m-%d-%H%M")
+                    date_str  = dt.strftime("%Y-%m-%d %H:%M")
+
+                filename = sanitize(f"{date_slug}-copilot-{variant}-{ws_name}-{session_id[:8]}") + ".md"
+                out_path = OUT_DIR / filename
+
+                full = {**fresh, **data}
+                full["start_ts"] = first_ts or fresh.get("start_ts")
+                md = render_copilot_md(full)
+                write_md(out_path, md)
+
+                entry = {
+                    "date":          date_str.split()[0],
+                    "time":          date_str.split()[1] if " " in date_str else "?",
+                    "source":        f"copilot/{variant}",
+                    "workspace":     ws_name,
+                    "session_id":    session_id,
+                    "turns":         len(data["turns"]),
+                    "files_written": len(data["files_written"]),
+                    "log":           str(out_path),
+                    "req_file":      find_req_file(session_id),
+                    **stop_fields(session_id),
+                }
+                append_index(entry, existing_ids)
+                state["processed"][state_key] = n
+
+                if prev == 0:
+                    new_count += 1
+                else:
+                    upd_count += 1
+
+    return new_count, upd_count
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    with index_lock():
+        state       = load_state()
+        existing_ids = load_index_ids()
+
+        claude_new, claude_upd = process_claude_sessions(state, existing_ids)
+        cop_new,    cop_upd    = process_copilot_sessions(state, existing_ids)
+
+        save_state(state)
+
+    total = claude_new + claude_upd + cop_new + cop_upd
+    prefix = "[dry-run] " if DRY_RUN else ""
+    log(
+        f"{prefix}Done — "
+        f"claude-code: +{claude_new} new ~{claude_upd} updated | "
+        f"copilot: +{cop_new} new ~{cop_upd} updated | "
+        f"total touched: {total}"
+    )
+
+if __name__ == "__main__":
+    main()

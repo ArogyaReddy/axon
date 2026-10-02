@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# =============================================================================
+# arog-on — start all AROG background daemons (LaunchAgents).
+# =============================================================================
+# Zero-AI. Loads the 4 real LaunchAgents this framework depends on:
+#   com.arog.rollup-server, com.arog.ar-checkgate, com.arog.capture-sessions,
+#   com.arog.pr-notify
+# Safe to run repeatedly — skips any daemon already running.
+# =============================================================================
+
+set -uo pipefail
+
+PLIST_DIR="${HOME}/Library/LaunchAgents"
+PLISTS=(com.arog.rollup-server com.arog.ar-checkgate com.arog.capture-sessions com.arog.pr-notify)
+
+echo "arog-on: starting AROG background daemons..."
+for label in "${PLISTS[@]}"; do
+  plist="${PLIST_DIR}/${label}.plist"
+  if [[ ! -f "$plist" ]]; then
+    echo "  SKIP  ${label} — plist not found at ${plist}"
+    continue
+  fi
+  if launchctl list "$label" &>/dev/null; then
+    echo "  OK    ${label} — already running"
+  elif launchctl load "$plist" 2>/dev/null; then
+    echo "  START ${label}"
+  else
+    echo "  FAIL  ${label} — launchctl load failed"
+  fi
+done
+echo "arog-on: done. Run 'arog status' to verify."

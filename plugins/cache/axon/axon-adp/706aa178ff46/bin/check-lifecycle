@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+// check-lifecycle (platform patterns 1 and 4): in a changed event handler, lifecycle methods are defined in the
+// mandatory order, and UUIDs are generated only inside setOutput() (validateInput and commit can run more than once,
+// so an id made there differs between retries).
+// Usage: check-lifecycle [--base <ref>] [--all]
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { runChecker, lineOf } from '../lib/changed.mjs';
+
+const ORDER = ['initialize', 'validateInput', 'validateEvent', 'setWorkArea', 'setOutput', 'setTitle', 'setSummary', 'preCommit', 'commit'];
+const DEF = /^[ \t]*(?:(?:public|protected|private|async|override)\s+)*(initialize|validateInput\w*|validateEvent|setWorkArea|setOutput|setTitle|setSummary|preCommit|commit)\s*\([^)]*\)\s*(?::\s*[^{]+)?\{/gm;
+const UUID = /\buuid\.v4\(\)|\buuidv4\(\)|\brandomUUID\(\)/g;
+
+runChecker('check-lifecycle', (root, files) => {
+  const findings = [];
+  for (const file of files.filter(f => /^src\/[^/]+\/events\/.+\.tsx?$/.test(f) && !/\.(spec|test)\.tsx?$/.test(f))) {
+    const text = readFileSync(path.join(root, file), 'utf8');
+    const defs = [...text.matchAll(DEF)].map(m => ({ name: m[1], rank: ORDER.indexOf(m[1].startsWith('validateInput') ? 'validateInput' : m[1]), index: m.index }));
+    let highest = { rank: -1 };
+    for (const d of defs) {
+      if (d.rank < highest.rank) findings.push({ file, line: lineOf(text, d.index), message: `${d.name}() is defined after ${highest.name}(); mandatory order: ${ORDER.join(' > ')}` });
+      else highest = d;
+    }
+    for (const u of text.matchAll(UUID)) {
+      const inside = defs.filter(d => d.index < u.index).at(-1);
+      if (inside && inside.name !== 'setOutput') findings.push({ file, line: lineOf(text, u.index), message: `UUID generated in ${inside.name}(); generate ids only in setOutput()` });
+    }
+  }
+  return findings;
+});

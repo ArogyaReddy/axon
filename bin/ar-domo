@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# ar-demo — AROG Observability: live proof of all 5 gaps
+#
+# Usage:
+#   ar-demo            → walk through all 5 gaps with commentary
+#   ar-demo gap1       → Gap 1 only (requirement capture)
+#   ar-demo gap2       → Gap 2 only (session outcome log)
+#   ar-demo gap3       → Gap 3 only (background monitor / hard blocks)
+#   ar-demo gap4       → Gap 4 only (historical rollup)
+#   ar-demo gap5       → Gap 5 only (traceability)
+
+set -euo pipefail
+CLAUDE="$HOME/.claude"
+
+# ── Colours ────────────────────────────────────────────────────────────────
+GRN='\033[0;32m'; YEL='\033[0;33m'; RED='\033[0;31m'; BLU='\033[0;36m'
+BOLD='\033[1m'; DIM='\033[2m'; RST='\033[0m'
+
+header()  { echo; echo -e "${BOLD}${BLU}══ $1 ══${RST}"; echo; }
+note()    { echo -e "  ${DIM}$1${RST}"; }
+cmd()     { echo -e "  ${YEL}\$ $1${RST}"; }
+result()  { echo -e "  ${GRN}$1${RST}"; }
+blocked() { echo -e "  ${RED}$1${RST}"; }
+pass()    { echo -e "  ${GRN}✓ $1${RST}"; }
+fail()    { echo -e "  ${RED}✗ $1${RST}"; exit 1; }
+gap_badge(){ echo -e "${BOLD}${BLU}[ Gap $1 — $2 ]  ${GRN}$3${RST}"; }
+divider() { echo -e "${DIM}──────────────────────────────────────────────────────${RST}"; }
+
+FILTER="${1:-all}"
+
+# ── GAP 1 — Requirement Capture ───────────────────────────────────────────
+demo_gap1() {
+  gap_badge "1" "Requirement Capture" "95% LIVE"
+  note "Problem: sessions started with no record of the goal."
+  note "Solution: the first message is auto-extracted and saved as JSON on disk."
+  echo
+
+  header "1a. Is the hook wired in settings.json?"
+  cmd "grep 'ar-req-capture' ~/.claude/settings.json"
+  grep "ar-req-capture" "$CLAUDE/settings.json" && pass "Hook registered" || fail "NOT FOUND in settings.json"
+
+  header "1b. Did today's session capture a requirement?"
+  TODAY=$(date +%Y%m%d)
+  REQ_COUNT=$(find "$CLAUDE/session-env/$TODAY" -name "req-*.json" 2>/dev/null | wc -l | tr -d ' ')
+  cmd "ls ~/.claude/session-env/$TODAY/req-*.json | wc -l"
+  result "$REQ_COUNT requirement file(s) captured today"
+  if [ "$REQ_COUNT" -eq 0 ]; then
+    note "(If this is the very first edit of a fresh session, capture fires on first Write/Edit — start editing to trigger it)"
+  fi
+
+  header "1c. What does the most recent requirement say?"
+  cmd "bash ~/.claude/bin/ar-req-log --show"
+  echo
+  bash "$CLAUDE/bin/ar-req-log" --show 2>/dev/null || note "(No requirement captured yet this session)"
+
+  header "1d. Self-check alarm log (empty = healthy)"
+  cmd "cat ~/.claude/logs/req-capture-alerts.log"
+  ALERT_COUNT=$(wc -l < "$CLAUDE/logs/req-capture-alerts.log" 2>/dev/null || echo 0)
+  if [ "$ALERT_COUNT" -eq 0 ]; then
+    pass "No alerts — every session with edits produced a req file"
+  else
+    cat "$CLAUDE/logs/req-capture-alerts.log"
+    note "^ These are alerts where edits happened but no req file was captured"
+  fi
+  echo
+}
+
+# ── GAP 2 — Session Outcome Log ───────────────────────────────────────────
+demo_gap2() {
+  gap_badge "2" "Session Outcome Log" "98% LIVE"
+  note "Problem: nothing was written at session end. No record of tests, files, or push status."
+  note "Solution: LaunchAgent auto-converts every session to a permanent indexed record."
+  echo
+
+  header "2a. Is the LaunchAgent running?"
+  cmd "launchctl list | grep capture-sessions"
+  launchctl list | grep "capture-sessions" && pass "LaunchAgent active" || fail "NOT RUNNING"
+
+  header "2b. How many sessions are in the permanent index?"
+  LINES=$(wc -l < "$CLAUDE/docs/sessions/sessions.jsonl" | tr -d ' ')
+  cmd "wc -l ~/.claude/docs/sessions/sessions.jsonl"
+  result "$LINES sessions recorded"
+
+  header "2c. Are all records valid and duplicate-free?"
+  cmd "python3 -c 'validate sessions.jsonl...'"
+  python3 - <<'PYEOF'
+import json, collections, sys
+path = __import__('os').path.expanduser('~/.claude/docs/sessions/sessions.jsonl')
+ids=[]; bad=0
+with open(path) as f:
+    for l in f:
+        l=l.strip()
+        if not l: continue
+        try:
+            r=json.loads(l)
+            if r.get('session_id'): ids.append(r['session_id'])
+        except: bad+=1
+c=collections.Counter(ids)
+dupes=[k for k,v in c.items() if v>1]
+print(f"  invalid lines:  {bad}")
+print(f"  total sessions: {len(ids)}")
+print(f"  unique:         {len(c)}")
+print(f"  duplicates:     {len(dupes)}")
+if bad==0 and not dupes:
+    print("\033[0;32m  ✓ CLEAN — zero invalid lines, zero duplicates\033[0m")
+else:
+    print("\033[0;31m  ✗ ISSUES FOUND\033[0m"); sys.exit(1)
+PYEOF
+
+  header "2d. Last 5 sessions recorded"
+  cmd "tail -5 ~/.claude/docs/sessions/sessions.jsonl | jq ..."
+  python3 - <<'PYEOF'
+import json, os
+path = os.path.expanduser('~/.claude/docs/sessions/sessions.jsonl')
+rows=[]
+with open(path) as f:
+    for l in f:
+        l=l.strip()
+        if not l: continue
+        try: rows.append(json.loads(l))
+        except: pass
+for r in rows[-5:]:
+    date = r.get('date','?')
+    sid  = r.get('session_id','?')[:8]
+    turns= r.get('turns','?')
+    files= r.get('files_written','?')
+    tests= r.get('tests_run','?')
+    branch=r.get('branch') or 'n/a'
+    print(f"  {date}  {sid}  turns={turns}  files={files}  tests={tests}  branch={branch}")
+PYEOF
+  echo
+}
+
+# ── GAP 3 — Background Monitor ────────────────────────────────────────────
+demo_gap3() {
+  gap_badge "3" "Background Monitor" "95% LIVE"
+  note "Problem: Claude could write dangerous code, skip tests, claim done — nothing stopped it."
+  note "Solution: CRITICAL/HIGH writes are hard-blocked BEFORE touching disk. No-test Stop is blocked."
+  echo
+
+  header "3a. Run the test suites"
+  cmd "node ~/.claude/tests/ar-review-pre-write.test.js"
+  node "$CLAUDE/tests/ar-review-pre-write.test.js" 2>&1 | sed 's/^/  /'
+  echo
+  cmd "node ~/.claude/tests/ar-review-on-stop-block.test.js"
+  node "$CLAUDE/tests/ar-review-on-stop-block.test.js" 2>&1 | sed 's/^/  /'
+
+  header "3b. Simulate a CRITICAL block (real subprocess — no file is written)"
+  cmd "echo '...shell injection content...' | node hooks/ar-review-pre-write.js"
+  PAYLOAD='{"tool_name":"create_file","tool_input":{"file_path":"/tmp/demo-critical.ts","content":"function run(msg) {\n  const canonical = msg.canonical;\n  spawn('"'"'sh'"'"', ['"'"'-c'"'"', canonical]);\n}\n"}}'
+  EXIT_CODE=0
+  OUTPUT=$(echo "$PAYLOAD" | node "$CLAUDE/hooks/ar-review-pre-write.js" 2>&1) || EXIT_CODE=$?
+  echo "$OUTPUT" | sed 's/^/  /'
+  if [ "$EXIT_CODE" -eq 2 ]; then
+    blocked "  ⛔ Exit code $EXIT_CODE — write was BLOCKED"
+  else
+    fail "Expected exit 2 (block), got $EXIT_CODE — something is wrong"
+  fi
+
+  header "3c. Confirm clean content is never blocked"
+  CLEAN='{"tool_name":"create_file","tool_input":{"file_path":"/tmp/demo-clean.ts","content":"function add(a, b) { return a + b; }\n"}}'
+  EXIT_CLEAN=0
+  echo "$CLEAN" | node "$CLAUDE/hooks/ar-review-pre-write.js" > /dev/null 2>&1 || EXIT_CLEAN=$?
+  if [ "$EXIT_CLEAN" -eq 0 ]; then
+    pass "Clean content allowed (exit 0) — no false positives"
+  else
+    fail "Clean content was blocked (unexpected)"
+  fi
+  echo
+}
+
+# ── GAP 4 — Historical Rollup ─────────────────────────────────────────────
+demo_gap4() {
+  gap_badge "4" "Historical Rollup & Dashboard" "90% LIVE"
+  note "Problem: RUNNING-LOG.md was 15 lines, branch + file count only. No history."
+  note "Solution: 84 days of sessions aggregated, recurring-file detection, HTML dashboard."
+  echo
+
+  header "4a. Last 7 days summary"
+  cmd "node ~/.claude/bin/ar-rollup show --days 7"
+  node "$CLAUDE/bin/ar-rollup" show --days 7 2>&1 | sed 's/^/  /'
+
+  header "4b. Dashboard stats"
+  cmd "grep stat-num ~/.claude/docs/reports/dashboard.html"
+  TOTAL=$(grep -o 'stat-num">[0-9]*' "$CLAUDE/docs/reports/dashboard.html" | head -1 | grep -o '[0-9]*')
+  DAYS=$(grep -o 'stat-num">[0-9]*' "$CLAUDE/docs/reports/dashboard.html" | head -2 | tail -1 | grep -o '[0-9]*')
+  RECUR=$(grep -o 'stat-num">[0-9]*' "$CLAUDE/docs/reports/dashboard.html" | head -3 | tail -1 | grep -o '[0-9]*')
+  result "  $TOTAL sessions    $DAYS days covered    $RECUR recurring files"
+  DATERANGE=$(grep "Date range" "$CLAUDE/docs/reports/dashboard.html" | sed 's/<[^>]*>//g' | tr -s ' ' | head -1)
+  result " $DATERANGE"
+
+  header "4c. Open the dashboard in your browser"
+  cmd "open ~/.claude/docs/reports/dashboard.html"
+  open "$CLAUDE/docs/reports/dashboard.html" 2>/dev/null && pass "Dashboard opened" || note "(run: open ~/.claude/docs/reports/dashboard.html)"
+
+  header "4d. Open the AROG Showcase page"
+  cmd "open ~/.claude/docs/real-gaps/arog-showcase.html"
+  open "$CLAUDE/docs/real-gaps/arog-showcase.html" 2>/dev/null && pass "Showcase page opened" || note "(run: open ~/.claude/docs/real-gaps/arog-showcase.html)"
+  echo
+}
+
+# ── GAP 5 — Traceability ──────────────────────────────────────────────────
+demo_gap5() {
+  gap_badge "5" "Requirement-to-Outcome Traceability" "99% LIVE"
+  note "Problem: requirement, files, tests, commit were in 4 separate places, never connected."
+  note "Solution: ar-tracker trace joins the full chain. High-confidence sessions auto-classify at Stop."
+  echo
+
+  header "5a. Trace a real session (find one with a req file)"
+  TODAY=$(date +%Y%m%d)
+  YESTERDAY=$(date -v-1d +%Y%m%d 2>/dev/null || date -d yesterday +%Y%m%d 2>/dev/null || echo "")
+  SESSION_ID=""
+  for DAY in "$TODAY" "$YESTERDAY"; do
+    [ -z "$DAY" ] && continue
+    FIRST_REQ=$(find "$CLAUDE/session-env/$DAY" -name "req-*.json" 2>/dev/null | sort | tail -1)
+    if [ -n "$FIRST_REQ" ]; then
+      SESSION_ID=$(python3 -c "import json; d=json.load(open('$FIRST_REQ')); print((d.get('session_id') or d.get('sessionId') or '')[:8])" 2>/dev/null || true)
+      [ -n "$SESSION_ID" ] && break
+    fi
+  done
+
+  if [ -n "$SESSION_ID" ]; then
+    cmd "node ~/.claude/bin/ar-tracker trace $SESSION_ID"
+    node "$CLAUDE/bin/ar-tracker" trace "$SESSION_ID" 2>&1 | sed 's/^/  /'
+  else
+    note "(No recent session with a req file found — try after your next session edit)"
+  fi
+
+  header "5b. Show all gap classifications"
+  cmd "node ~/.claude/bin/ar-tracker show"
+  node "$CLAUDE/bin/ar-tracker" show 2>&1 | sed 's/^/  /'
+  echo
+}
+
+# ── RUN ───────────────────────────────────────────────────────────────────
+echo
+echo -e "${BOLD}${BLU}╔══════════════════════════════════════════════════════╗${RST}"
+echo -e "${BOLD}${BLU}║  AROG — Observability Framework Live Demo            ║${RST}"
+echo -e "${BOLD}${BLU}║  All output is LIVE from this machine's real data    ║${RST}"
+echo -e "${BOLD}${BLU}╚══════════════════════════════════════════════════════╝${RST}"
+echo
+
+case "$FILTER" in
+  gap1) demo_gap1 ;;
+  gap2) demo_gap2 ;;
+  gap3) demo_gap3 ;;
+  gap4) demo_gap4 ;;
+  gap5) demo_gap5 ;;
+  all)
+    demo_gap1; divider
+    demo_gap2; divider
+    demo_gap3; divider
+    demo_gap4; divider
+    demo_gap5
+    ;;
+  *)
+    echo "Usage: ar-demo [gap1|gap2|gap3|gap4|gap5]"
+    exit 1
+    ;;
+esac
+
+divider
+echo
+echo -e "${BOLD}${GRN}All 5 gaps demonstrated with live data from this machine.${RST}"
+echo -e "${DIM}Shareable showcase page: ~/.claude/docs/real-gaps/arog-showcase.html${RST}"
+echo

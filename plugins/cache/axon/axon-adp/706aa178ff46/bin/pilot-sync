@@ -1,0 +1,98 @@
+#!/usr/bin/env node
+// pilot-sync: the mechanical part of git-pilot-feature-changes in adp-e-product. It never pushes and never
+// force-anything: pushing goes through git-push, which asks the user.
+//   pilot-sync --pilot <branch> [--dry-run] [--skip-tests]   merge origin/<pilot> into the current feature branch,
+//                                                           then install, rebuild, tsc and test what changed
+//   pilot-sync --pilot <branch> --continue [--skip-tests]   after conflicts were resolved and staged
+//   pilot-sync --pilot <branch> --new <feature-branch>      new feature branch from the latest PILOT, full setup
+// Exit codes: 0 done, 1 a build/tsc/test step failed, 2 usage or precondition, 3 merge conflicts to resolve.
+import { spawnSync } from 'node:child_process';
+import { existsSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import { domainsOf, git, repoRoot } from '../lib/changed.mjs';
+
+const argv = process.argv.slice(2);
+const opt = k => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : undefined; };
+const flag = k => argv.includes(`--${k}`);
+const root = repoRoot();
+const pilot = opt('pilot');
+const MAKE_FLAGS = ['LINT_CODE=false', 'BUNDLE=false', 'DETECT_CIRCULAR_DEPENDENCIES=false', 'ZIP_AND_UPLOAD=false', 'TEST=false'];
+
+function die(code, msg) { console.error(`pilot-sync: ${msg}`); process.exit(code); }
+function sh(label, cmd, args, { cwd = '.', env = {} } = {}) {
+  console.log(`\n== ${label}: ${[cmd, ...args].join(' ')}`);
+  const r = spawnSync(cmd, args, { cwd: path.join(root, cwd), stdio: 'inherit', env: { ...process.env, ...env } });
+  return r.status === 0;
+}
+const lines = s => s.split('\n').filter(Boolean);
+
+if (!pilot) die(2, 'usage: pilot-sync --pilot <branch> [--continue | --new <feature-branch> | --dry-run] [--skip-tests]');
+
+// ---------- new feature branch from PILOT (validated sequence from the legacy skill, 2026-07-16) ----------
+if (opt('new')) {
+  if (lines(git(root, 'status', '--porcelain')).length) die(2, 'working tree not clean; commit or stash first');
+  const ok = sh('fetch', 'git', ['fetch', 'origin'])
+    && sh('checkout pilot', 'git', ['checkout', pilot])
+    && sh('pull pilot', 'git', ['pull', '--ff-only', 'origin', pilot])
+    && sh('new branch', 'git', ['checkout', '-b', opt('new')])
+    && sh('root install', 'npm', ['ci', '--no-fund'])
+    && sh('domain install', './bin/parallel-setup.sh', [], { env: { MERGE_PRODUCT_AUTOMATION: '1' } }) // without it the script waits for ENTER forever
+    && sh('compile', './bin/parallel-compile.sh', []);
+  if (!ok) die(1, 'a setup step failed (see above)');
+  rmSync(path.join(root, 'meta', 'build'), { recursive: true, force: true }); // IFX-002: never load a stale meta build
+  rmSync(path.join(root, 'meta', 'build-metasync'), { recursive: true, force: true });
+  console.log(`\nBranch ${opt('new')} is ready. Remaining steps need your interactive login, in this order:
+  e-cli awsrole login --all     # password prompt
+  awslogin                      # exports AWS_PROFILE=FIT etc.; load-meta needs it
+  npm run load-meta -- FIT
+  npm run i18n:custom           # slow (5-10+ min), not hung
+  LOG_LEVEL=debug npm run dev:remote:raw   # long-running server, own terminal`);
+  process.exit(0);
+}
+
+// ---------- merge PILOT into the current feature branch ----------
+const branch = git(root, 'rev-parse', '--abbrev-ref', 'HEAD');
+if (!branch.startsWith('feature/')) die(2, `current branch "${branch}" is not a feature/ branch`);
+const merging = existsSync(path.join(root, '.git', 'MERGE_HEAD'));
+let changed;
+if (flag('continue')) {
+  if (!merging) die(2, 'no merge in progress; run without --continue');
+  const left = lines(git(root, 'diff', '--name-only', '--diff-filter=U'));
+  if (left.length) die(3, `still unresolved:\n${left.join('\n')}`);
+  if (!sh('commit merge', 'git', ['commit', '--no-edit'])) die(1, 'merge commit failed');
+  changed = lines(git(root, 'diff', '--name-only', 'HEAD^1', 'HEAD'));
+} else {
+  if (merging) die(2, 'a merge is already in progress: resolve it and run with --continue, or abort it yourself');
+  if (lines(git(root, 'status', '--porcelain', '--untracked-files=no')).length) die(2, 'uncommitted changes; commit or stash first');
+  if (!sh('fetch', 'git', ['fetch', 'origin', pilot])) die(1, 'fetch failed');
+  const behind = git(root, 'rev-list', '--count', `HEAD..origin/${pilot}`);
+  const ahead = git(root, 'rev-list', '--count', `origin/${pilot}..HEAD`);
+  changed = lines(git(root, 'diff', '--name-only', `HEAD...origin/${pilot}`));
+  console.log(`\n${branch}: ${ahead} commit(s) ahead, ${behind} behind origin/${pilot}; ${changed.length} file(s) change; domains: ${domainsOf(changed).join(', ') || 'none'}`);
+  if (flag('dry-run')) process.exit(0);
+  if (behind === '0') { console.log('Already up to date with PILOT.'); process.exit(0); }
+  if (!sh('merge', 'git', ['merge', '--no-ff', '--no-edit', `origin/${pilot}`])) {
+    const conflicts = lines(git(root, 'diff', '--name-only', '--diff-filter=U'));
+    if (!conflicts.length) die(1, 'merge failed without conflicts (see above)');
+    console.log(`\nCONFLICTS (${conflicts.length}):\n${conflicts.join('\n')}`);
+    die(3, `resolve each file (PILOT wins unless this branch's change must survive), git add them, then: pilot-sync --pilot ${pilot} --continue`);
+  }
+}
+
+// ---------- rebuild and verify what changed ----------
+const domains = domainsOf(changed);
+const steps = [() => sh('root install', 'npm', ['ci', '--no-fund'])];
+if (changed.some(f => f.startsWith('src/shared/'))) {
+  steps.push(() => sh('shared install', 'npm', ['install', '--no-fund'], { cwd: 'src/shared' }) && sh('shared build', 'make', ['shared', ...MAKE_FLAGS]));
+}
+for (const d of domains.filter(d => existsSync(path.join(root, 'src', d)))) {
+  steps.push(() => sh(`${d} install`, 'npm', ['install', '--no-fund'], { cwd: path.join('src', d) }) && sh(`${d} build`, 'make', [d, ...MAKE_FLAGS]));
+}
+if (changed.some(f => f.startsWith('i18n/'))) steps.push(() => sh('i18n build', 'make', ['i18n']));
+for (const d of domains.filter(d => existsSync(path.join(root, 'src', d)))) {
+  steps.push(() => sh(`${d} tsc`, 'npx', ['tsc', '--noEmit'], { cwd: path.join('src', d) }));
+  if (!flag('skip-tests')) steps.push(() => sh(`${d} tests`, 'npx', ['jest', '--no-coverage'], { env: { TEST_BUSINESS_DOMAIN: d } }));
+}
+for (const step of steps) if (!step()) die(1, 'stopped at the failed step above; nothing was pushed');
+if (changed.some(f => f.startsWith('meta/src/'))) console.log('\nmeta/src changed: run `make meta && npm run load-meta -- FIT` before pushing (IFX-002).');
+console.log(`\nMerged origin/${pilot} into ${branch}; build, tsc${flag('skip-tests') ? '' : ' and tests'} passed for: ${domains.join(', ') || 'no domains'}. Not pushed: push with git-push.`);
