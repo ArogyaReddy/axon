@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-01T16:00:05.000Z","hook_event_name":"PostToolUse","session_id":"vscode-session-1","cwd":"${REPO}","tool_name":"run_in_terminal","tool_input":{"command":"npm test","explanation":"Run tests","goal":"test","mode":"sync"},"tool_response":"# tests 3\n# pass 3\n# fail 0","tool_use_id":"toolu_vrtx_06"}

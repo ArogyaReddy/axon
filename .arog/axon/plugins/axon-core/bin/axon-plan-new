@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+// axon-plan-new <slug>: create <plans dir>/<slug>.plan.md from the plan template and print its path.
+// Plans dir: $AXON_PLANS_DIR, else $AXON_DOCS_DIR/plans, else ~/.axon/docs/plans. Never overwrites. Claude never needs to read plugin files.
+import { copyFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(realpathSync(fileURLToPath(import.meta.url)));
+const slug = process.argv[2];
+if (!slug || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug)) {
+  console.error('usage: axon-plan-new <slug>   (letters, digits, dot, dash, underscore; e.g. organizationPolicy.create-bug-2026-10-01)');
+  process.exit(1);
+}
+const dir = process.env.AXON_PLANS_DIR ?? path.join(process.env.AXON_DOCS_DIR || path.join(process.env.AXON_HOME || path.join(os.homedir(), '.axon'), 'docs'), 'plans');
+const file = path.join(dir, `${slug}.plan.md`);
+if (existsSync(file)) { console.error(`axon-plan-new: ${file} already exists; edit it instead`); process.exit(1); }
+mkdirSync(dir, { recursive: true });
+copyFileSync(path.join(here, '..', 'templates', 'plan.md'), file);
+console.log(file);

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": ["Bash(python yaml_validator.py *)", "Bash(python -m pytest tests/unit/*)", "Bash(bash runner/scripts/ci-check.sh)"],
+    "ask": [
+      "Bash(python pacer_flags.py set api.include_destructive *)",
+      "Bash(python api_runner.py --sweep*)",
+      "Bash(python api_runner.py --all*)",
+      "Bash(python pacer_runner.py *)",
+      "Bash(python -m pytest tests/integration/*)"
+    ]
+  }
+}

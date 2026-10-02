@@ -1,0 +1,6 @@
+{
+  "permissions": {
+    "allow": ["Bash(bash utils/syncMetagenToDB.sh --dry-run)", "Bash(npm run lint)", "Bash(npm run format)"],
+    "ask": ["Bash(bash utils/syncMetagenToDB.sh)", "Bash(npm start)", "Bash(npm run test)"]
+  }
+}

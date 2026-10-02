@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+// axon-plan-check <plan.md> | --latest [--dir <plans dir>] [--since-minutes N] [--hook]
+// Checks a plan doc against the template rules. Exit 0 when complete, 1 with the list of problems.
+// --hook (Stop hook use): exit 2 so Claude Code blocks the stop and shows the problems; with --since-minutes, plans
+// older than N minutes are ignored (a turn that stops to ask a question is not blocked by an old plan).
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(realpathSync(fileURLToPath(import.meta.url)));
+const { checkPlan } = await import(path.join(here, '..', 'lib', 'plan-check.mjs'));
+const argv = process.argv.slice(2);
+const opt = n => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
+
+let file = argv[0] && !argv[0].startsWith('--') ? argv[0] : null;
+if (argv.includes('--latest')) {
+  const dir = opt('dir') ?? process.env.AXON_PLANS_DIR ?? path.join(process.env.AXON_DOCS_DIR || path.join(process.env.AXON_HOME || path.join(os.homedir(), '.axon'), 'docs'), 'plans');
+  const plans = existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith('.plan.md')).map(f => path.join(dir, f)) : [];
+  plans.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  const since = Number(opt('since-minutes') ?? 0);
+  file = plans.find(f => !since || Date.now() - statSync(f).mtimeMs <= since * 60_000);
+  if (!file) { console.log(`No recent plan docs in ${dir}`); process.exit(0); }
+}
+if (!file) { console.error('usage: axon-plan-check <plan.md> | --latest [--dir <dir>]'); process.exit(1); }
+
+const r = checkPlan(readFileSync(file, 'utf8'));
+if (r.ok) { console.log(`axon-plan-check: OK ${file}`); process.exit(0); }
+const report = [`axon-plan-check: INCOMPLETE ${file}`, ...r.problems.map(p => `  - ${p}`)].join('\n');
+if (argv.includes('--hook')) { process.stderr.write(`${report}\nComplete the plan doc before finishing.\n`); process.exit(2); }
+console.log(report);
+process.exit(1);

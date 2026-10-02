@@ -1,0 +1,11 @@
+{
+  "note": "Pinned external tools, installed by `axon tools install` into ~/.axon/tools and checked by `axon doctor`.",
+  "playwright-cli": {
+    "package": "@playwright/cli",
+    "version": "0.1.22"
+  },
+  "markmap": {
+    "package": "markmap-cli",
+    "version": "0.18.12"
+  }
+}

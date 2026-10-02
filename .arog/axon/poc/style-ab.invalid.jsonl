@@ -1,0 +1,6 @@
+{"variant":"default","run":1,"cost":0.3404083,"turns":17,"wall_s":94,"output":10308,"cache_write":18449,"cache_read":247581,"hidden_pass":1,"own_tests":3,"own_fail":0,"reply_chars":2230,"em_dash":0}
+{"variant":"lean","run":1,"cost":0.15440230000000002,"turns":11,"wall_s":31,"output":3475,"cache_write":12551,"cache_read":87341,"hidden_pass":1,"own_tests":3,"own_fail":0,"reply_chars":214,"em_dash":0}
+{"variant":"default","run":2,"cost":0.2068177,"turns":13,"wall_s":47,"output":5059,"cache_write":14037,"cache_read":153079,"hidden_pass":1,"own_tests":3,"own_fail":0,"reply_chars":219,"em_dash":0}
+{"variant":"lean","run":2,"cost":0.19384059999999997,"turns":12,"wall_s":95,"output":4807,"cache_write":13833,"cache_read":126522,"hidden_pass":1,"own_tests":3,"own_fail":0,"reply_chars":97,"em_dash":0}
+{"variant":"default","run":3,"cost":0.168049,"turns":12,"wall_s":37,"output":3949,"cache_write":12524,"cache_read":109650,"hidden_pass":1,"own_tests":3,"own_fail":0,"reply_chars":200,"em_dash":0}
+{"variant":"lean","run":3,"cost":0.1861303,"turns":11,"wall_s":46,"output":4765,"cache_write":13726,"cache_read":105081,"hidden_pass":1,"own_tests":3,"own_fail":0,"reply_chars":207,"em_dash":0}

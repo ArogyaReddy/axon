@@ -1,0 +1,13 @@
+{
+  "name": "axon",
+  "owner": { "name": "arog" },
+  "description": "axon: inline skills with code-checked steps for Claude Code",
+  "plugins": [
+    { "name": "axon-core", "source": "./plugins/axon-core", "description": "Process: prime, plan, understand, tdd, verify, git-push, handoff, council" },
+    { "name": "axon-guard", "source": "./plugins/axon-guard", "description": "Hooks that enforce the rules: TDD gates, test lock, evidence, guards" },
+    { "name": "axon-qa", "source": "./plugins/axon-qa", "description": "Browser QA with playwright-cli: user stories in parallel" },
+    { "name": "axon-learn", "source": "./plugins/axon-learn", "description": "Explain and learn: WH explainer, code mentor, mind maps, courses" },
+    { "name": "axon-adp", "source": "./plugins/axon-adp", "description": "ADP platform: pilot branch sync, ADP checkers, rules and presets" },
+    { "name": "axon-observe", "source": "./plugins/axon-observe", "description": "Event log and dashboard feed" }
+  ]
+}

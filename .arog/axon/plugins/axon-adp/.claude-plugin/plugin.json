@@ -1,0 +1,7 @@
+{
+  "name": "axon-adp",
+  "description": "ADP platform: pilot branch sync, ADP checkers, rules and presets",
+  "author": {
+    "name": "arog"
+  }
+}

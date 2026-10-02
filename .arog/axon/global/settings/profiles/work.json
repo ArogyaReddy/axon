@@ -1,0 +1,24 @@
+{
+  "model": "us.anthropic.claude-sonnet-4-6[1m]",
+  "env": {
+    "AXON_PROFILE": "work",
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "AWS_REGION": "us-east-1",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "us.anthropic.claude-sonnet-4-6[1m]",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
+  },
+  "extraKnownMarketplaces": {
+    "adp-e-agentic-workspace": {
+      "source": { "source": "git", "url": "ssh://git@bitbucket.es.ad.adp.com:7999/il/adp-e-agentic-workspace.git", "ref": "master" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "adp-e-aisdlc@adp-e-agentic-workspace": true, "adp-e-database-tools@adp-e-agentic-workspace": true,
+    "adp-e-doc-tools@adp-e-agentic-workspace": true, "adp-e-knowledge-base@adp-e-agentic-workspace": true,
+    "adp-e-qa-tools@adp-e-agentic-workspace": true, "adp-e-quality@adp-e-agentic-workspace": true,
+    "adp-e-release@adp-e-agentic-workspace": true, "adp-e-utilities@adp-e-agentic-workspace": true,
+    "adp-e-client-success@adp-e-agentic-workspace": true, "adp-e-cool-cats@adp-e-agentic-workspace": true,
+    "adp-e-front-end@adp-e-agentic-workspace": true, "adp-e-teamml@adp-e-agentic-workspace": true
+  }
+}

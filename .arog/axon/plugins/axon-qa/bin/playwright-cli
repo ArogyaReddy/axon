@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// Runs the pinned playwright-cli that `axon tools install` puts in ~/.axon/tools (version in config/tools.json), so
+// every machine and every agent drives the same version. `open` uses system Chrome unless --browser is given
+// (AXON_PW_BROWSER overrides): no browser download is needed where Chrome is installed.
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const home = process.env.AXON_HOME || path.join(os.homedir(), '.axon');
+const bin = path.join(home, 'tools', 'playwright-cli', 'node_modules', '.bin', 'playwright-cli');
+if (!existsSync(bin)) {
+  process.stderr.write(`playwright-cli is not installed for axon (${bin}). Run: axon tools install\n`);
+  process.exit(127);
+}
+const args = process.argv.slice(2);
+if (args.find(a => !a.startsWith('-')) === 'open' && !args.some(a => a.startsWith('--browser'))) {
+  args.push(`--browser=${process.env.AXON_PW_BROWSER || 'chrome'}`);
+}
+const r = spawnSync(bin, args, { stdio: 'inherit' });
+process.exitCode = r.status ?? 1;

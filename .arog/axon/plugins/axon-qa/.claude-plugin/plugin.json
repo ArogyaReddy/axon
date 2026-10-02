@@ -1,0 +1,7 @@
+{
+  "name": "axon-qa",
+  "description": "Browser QA with playwright-cli: user stories in parallel",
+  "author": {
+    "name": "arog"
+  }
+}

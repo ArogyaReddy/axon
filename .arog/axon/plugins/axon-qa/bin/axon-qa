@@ -1,0 +1,189 @@
+#!/usr/bin/env node
+// axon-qa: runs user stories in real browsers at the lowest model cost.
+//   A story with a verified replay for its current text is replayed by code (no model call).
+//   Otherwise the qa-agent (Sonnet) runs it once in a browser session opened by code; when it passes, the replay it
+//   recorded is verified by code and saved next to the stories. A failing replay is re-learned once (the app may
+//   have changed); a story that fails again is reported as FAIL with screenshots and console output.
+// Usage: axon-qa run [--stories <dir>] [--filter <text>] [--parallel N] [--headed] [--no-relearn]
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from '../../axon-core/lib/args.mjs';
+import { parseStories, slug, storyHash } from '../lib/stories.mjs';
+import { pwRunner, replay, withSession } from '../lib/replay.mjs';
+
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PW = process.env.AXON_PLAYWRIGHT_BIN || path.join(PLUGIN_ROOT, 'bin', 'playwright-cli');
+const CLAUDE = process.env.AXON_CLAUDE_BIN || 'claude';
+const BROWSER = process.env.AXON_PW_BROWSER || 'chrome';
+const AXON_HOME = process.env.AXON_HOME || path.join(os.homedir(), '.axon');
+const DOCS = process.env.AXON_DOCS_DIR || path.join(process.env.AXON_HOME || path.join(os.homedir(), '.axon'), 'docs');
+const AGENT_SETTINGS = JSON.stringify({ effortLevel: 'medium' });
+const AGENT_TIMEOUT_MS = 600000;
+
+function agentRun(story, dir, session) {
+  const prompt = [
+    `Story: ${story.name}`,
+    `URL: ${story.url}`,
+    `Session: ${session} (already open at the URL; run every command as playwright-cli -s=${session} ...; do not open or close it)`,
+    `Evidence folder: ${dir} (your working directory)`,
+    '',
+    'Workflow:',
+    story.workflow,
+  ].join('\n');
+  const args = ['-p', prompt, '--agent', 'axon-qa:qa-agent', '--model', 'sonnet', '--output-format', 'json',
+    '--setting-sources', 'project', '--settings', AGENT_SETTINGS, '--strict-mcp-config', '--no-session-persistence',
+    '--plugin-dir', PLUGIN_ROOT, '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(playwright-cli *)'];
+  return new Promise(resolve => {
+    const child = spawn(CLAUDE, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    const timer = setTimeout(() => child.kill('SIGTERM'), AGENT_TIMEOUT_MS);
+    child.stdout.on('data', d => { out += d; });
+    child.on('error', e => { clearTimeout(timer); resolve({ cost: 0, error: e.message }); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      let cost = 0;
+      try { cost = JSON.parse(out).total_cost_usd ?? 0; } catch { /* no JSON: counted as no result below */ }
+      resolve({ cost });
+    });
+  });
+}
+
+const readJson = f => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return null; } };
+const firstFailure = steps => steps.find(s => s.status === 'FAIL');
+
+async function runStory(job, opts) {
+  const { story, stem, dir, replayFile, session } = job;
+  mkdirSync(dir, { recursive: true });
+  const hash = storyHash(story);
+  const authFile = story.auth ? path.join(AXON_HOME, 'secrets', 'playwright', `${story.auth}.json`) : null;
+  if (authFile && !existsSync(authFile)) {
+    return { status: 'FAIL', mode: 'setup', cost: 0, detail: `no saved login "${story.auth}" (${authFile}); save one with playwright-cli state-save` };
+  }
+  const sessionOpts = { browser: BROWSER, headed: opts.headed, authFile };
+  const pw = pwRunner(PW, session, dir);
+  const saved = readJson(replayFile);
+  let relearn = false;
+
+  if (saved?.story_hash === hash) {
+    const r = await withSession(pw, story, sessionOpts, () => replay(pw, saved.steps, dir));
+    writeFileSync(path.join(dir, 'replay-result.json'), JSON.stringify(r, null, 2));
+    if (r.status === 'PASS') return { status: 'PASS', mode: 'replayed', cost: 0, steps: r.steps.length };
+    if (opts.noRelearn) {
+      const f = firstFailure(r.steps);
+      return { status: 'FAIL', mode: 'replayed', cost: 0, detail: f ? `${f.step}: ${f.error}` : r.error };
+    }
+    relearn = true;
+  }
+
+  // Learn: the qa-agent runs the story in a session opened by code.
+  const learnSession = `${session}-l`;
+  const lpw = pwRunner(PW, learnSession, dir);
+  let cost = 0;
+  let agentRan = false;
+  const setup = await withSession(lpw, story, sessionOpts, async () => { agentRan = true; cost = (await agentRun(story, dir, learnSession)).cost; });
+  const mode = relearn ? 'relearned' : 'learned';
+  if (!agentRan) return { status: 'FAIL', mode: 'setup', cost: 0, detail: setup?.error ?? 'browser session did not start' };
+  const result = readJson(path.join(dir, 'result.json'));
+  if (!result) return { status: 'FAIL', mode, cost, detail: 'the qa-agent wrote no result.json' };
+  if (result.status !== 'PASS') {
+    const f = firstFailure(result.steps ?? []);
+    return { status: 'FAIL', mode, cost, detail: f ? `${f.step}: ${f.note ?? f.error ?? 'failed'}` : 'failed' };
+  }
+  // Keep the recorded replay only if code can run it end to end.
+  const rec = readJson(path.join(dir, 'replay.json'));
+  let note = 'no replay recorded';
+  if (rec?.steps?.length) {
+    const checkDir = path.join(dir, 'replay-check');
+    mkdirSync(checkDir, { recursive: true });
+    const cpw = pwRunner(PW, `${session}-c`, checkDir);
+    const check = await withSession(cpw, story, sessionOpts, () => replay(cpw, rec.steps, checkDir));
+    if (check.status === 'PASS') {
+      mkdirSync(path.dirname(replayFile), { recursive: true });
+      writeFileSync(replayFile, `${JSON.stringify({ story_hash: hash, story: story.name, recorded: new Date().toISOString(), steps: rec.steps }, null, 2)}\n`);
+      note = 'replay saved';
+    } else {
+      note = 'replay not saved (it did not pass when run by code)';
+    }
+  }
+  return { status: 'PASS', mode, cost, steps: (result.steps ?? []).length, detail: note };
+}
+
+async function pool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
+  }));
+  return out;
+}
+
+function stamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}_${String(d.getMilliseconds()).padStart(3, '0')}-${randomBytes(3).toString('hex')}`;
+}
+
+async function run(argv) {
+  const { option, flag } = parseArgs(argv);
+  const storiesDir = path.resolve(option('stories') ?? path.join('.axon', 'user_stories'));
+  const filter = option('filter') ?? '';
+  const files = existsSync(storiesDir)
+    ? readdirSync(storiesDir).filter(f => /\.ya?ml$/.test(f) && f.includes(filter)).sort() : [];
+  const runId = stamp();
+  const runDir = path.join(DOCS, 'qa', 'app-tests', runId);
+  const jobs = [];
+  const errors = [];
+  for (const f of files) {
+    const stem = f.replace(/\.ya?ml$/, '');
+    let stories;
+    try { stories = parseStories(readFileSync(path.join(storiesDir, f), 'utf8'), f); } catch (e) { errors.push(e.message); continue; }
+    for (const story of stories) {
+      const s = slug(story.name);
+      jobs.push({ story, stem, dir: path.join(runDir, stem, s), replayFile: path.join(storiesDir, '.replay', stem, `${s}.json`),
+        session: `${s.slice(0, 40)}-${runId.slice(-6)}` });
+    }
+  }
+  if (!jobs.length) {
+    console.log(`No stories found in ${storiesDir}${filter ? ` matching "${filter}"` : ''}.${errors.length ? `\n${errors.join('\n')}` : ''}`);
+    return 1;
+  }
+  const results = await pool(jobs, Math.max(1, Number(option('parallel') ?? 4)), job =>
+    runStory(job, { headed: flag('headed'), noRelearn: flag('no-relearn') })
+      .catch(e => ({ status: 'FAIL', mode: 'error', cost: 0, detail: e.message })));
+  const passed = results.filter(r => r.status === 'PASS').length;
+  const failed = results.length - passed;
+  const cost = results.reduce((s, r) => s + (r.cost || 0), 0);
+  const rows = jobs.map((j, i) => {
+    const r = results[i];
+    return `| ${i + 1} | ${j.story.name} | ${j.stem} | ${r.status} | ${r.mode} | ${(r.detail ?? '').replace(/\|/g, '/').replace(/\n/g, ' ')} |`;
+  });
+  const md = [
+    `# QA run ${runId}`,
+    '',
+    `Stories: ${results.length} | ${passed} passed, ${failed} failed. Model cost: $${cost.toFixed(2)} (${results.filter(r => r.mode === 'learned' || r.mode === 'relearned').length} agent runs, ${results.filter(r => r.mode === 'replayed').length} replays at $0).`,
+    '',
+    '| # | Story | File | Result | Mode | Detail |',
+    '|---|---|---|---|---|---|',
+    ...rows,
+    ...(errors.length ? ['', '## Story files skipped', '', ...errors.map(e => `- ${e}`)] : []),
+    '',
+    `Evidence (screenshots, console, results): ${runDir}`,
+    '',
+  ].join('\n');
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(path.join(runDir, 'report.md'), md);
+  console.log(md);
+  return failed || errors.length ? 1 : 0;
+}
+
+const [cmd, ...rest] = process.argv.slice(2);
+if (cmd !== 'run') {
+  console.error('Usage: axon-qa run [--stories <dir>] [--filter <text>] [--parallel N] [--headed] [--no-relearn]');
+  process.exitCode = 2;
+} else {
+  run(rest).then(code => { process.exitCode = code; }, e => { console.error(`axon-qa: ${e.message}`); process.exitCode = 1; });
+}

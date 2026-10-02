@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-01T16:00:02.000Z","hook_event_name":"PreToolUse","session_id":"vscode-session-1","cwd":"${REPO}","tool_name":"multi_replace_string_in_file","tool_input":{"explanation":"two edits","replacements":[{"filePath":"${REPO}/src/a.js","oldString":"a","newString":"b"},{"filePath":"${REPO}/CHANGELOG.md","oldString":"x","newString":"y"}]},"tool_use_id":"toolu_vrtx_03"}

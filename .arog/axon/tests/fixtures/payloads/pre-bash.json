@@ -1,0 +1,17 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "${HOME}/transcript.jsonl",
+  "cwd": "${REPO}",
+  "prompt_id": "ec20ecbb-49d5-45aa-9c07-4aa0a08377f8",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "node --test",
+    "description": "Run node test runner"
+  },
+  "tool_use_id": "toolu_01HkKaYMSqMi8LhLd3y7hqib"
+}

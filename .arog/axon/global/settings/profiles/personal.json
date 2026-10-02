@@ -1,0 +1,33 @@
+{
+  "env": {
+    "AXON_PROFILE": "personal",
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "filesystem": {
+      "denyRead": [
+        "~/.aws/credentials",
+        "~/.ssh",
+        "~/.axon/secrets"
+      ],
+      "allowWrite": [
+        "~/.axon/state",
+        "~/.axon/logs",
+        "~/.axon/events",
+        "~/.axon/cache"
+      ]
+    },
+    "excludedCommands": [
+      "playwright-cli *",
+      "axon-qa *"
+    ],
+    "network": {
+      "allowLocalBinding": true
+    }
+  },
+  "enabledPlugins": {
+    "axon-adp@axon": false
+  }
+}

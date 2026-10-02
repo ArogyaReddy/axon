@@ -1,0 +1,53 @@
+{
+  "root_cause": "Two independent bugs plus a missing feature:\n\n1. **Tax computed on the pre-discount subtotal.** `invoice.js` calls `taxFor(subtotal, region)` using the raw `subtotal` instead of `subtotal - discount`, so customers are taxed on money they never actually paid when a discount code is used.\n2. **Cent amounts are truncated, not rounded.** `money.js`'s `applyRate` uses `Math.floor(cents * rate)`, which always rounds down. For rates/subtotals that land exactly on a half-cent (e.g. `9500 * 0.0625 = 593.75`... more precisely cases like `1288 * 0.0625 = 80.5`), this truncates to the cent below instead of rounding to the nearest cent, causing tax to be \"one cent too low.\" Since percentage discounts will reuse this same rate-application logic, this bug would also under/over-round discount amounts.\n3. **No percentage discount type exists.** `codes.js` only defines `fixed` entries and `discount.js` throws `Unsupported code type` for anything else, so `SAVE10`/`SAVE25` can't be added without new code.\n4. **Discount code lookup is case-sensitive.** `discount.js`'s `lookup` indexes `CODES` directly by the raw `code` string, so `save10` or `Welcome5` would currently throw `Unknown discount code` instead of matching.",
+  "changes": [
+    {
+      "file": "src/money.js",
+      "change": "Change `applyRate` to round to the nearest cent instead of truncating: replace `Math.floor(cents * rate)` with `Math.round(cents * rate)`. Since `cents` and `rate` are always non-negative in this codebase, JS's `Math.round` (which rounds .5 toward +Infinity) is equivalent to 'round half up' for this input domain. This single fix covers both the tax rounding bug and (once reused) the percentage-discount rounding requirement."
+    },
+    {
+      "file": "src/codes.js",
+      "change": "Add two percent-type entries: `SAVE10: { type: 'percent', rate: 0.10 }` and `SAVE25: { type: 'percent', rate: 0.25 }`, alongside the existing fixed codes. Keys stay uppercase since lookup will normalize to uppercase."
+    },
+    {
+      "file": "src/discount.js",
+      "change": "In `lookup`, normalize the incoming code before indexing: `const entry = CODES[code.toUpperCase()];` (keep the 'Unknown discount code' error using the original, un-normalized `code` for a clearer message). In `discountFor`, add a branch for `entry.type === 'percent'` that returns `Math.min(applyRate(subtotalCents, entry.rate), subtotalCents)` (reusing `applyRate` from `money.js`, now imported), mirroring the existing 'never more than the subtotal' guard used for fixed codes. Keep the fixed-code branch and the 'Unsupported code type' throw for anything else unchanged."
+    },
+    {
+      "file": "src/invoice.js",
+      "change": "Compute the discount before tax and tax the post-discount amount: change `const tax = taxFor(subtotal, region);` to `const tax = taxFor(subtotal - discount, region);` (discount is already computed on the line above). `total` calculation stays `subtotal - discount + tax`."
+    }
+  ],
+  "test_cases": [
+    {
+      "name": "tax charged after discount, not before (fixes overcharge) + rounds instead of truncating",
+      "call": "buildInvoice([{ name: 'book', price: 100, qty: 1 }], { region: 'TX', code: 'WELCOME5' })",
+      "expected": "{ subtotal: 10000, discount: 500, tax: 594, total: 9094 } — old buggy code taxed the full 10000 and floored, giving tax: 625; correct behaviour taxes the discounted 9500 (9500 * 0.0625 = 593.75) and rounds to 594"
+    },
+    {
+      "name": "tax rounds half up on an exact half-cent boundary (fixes 'one cent too low')",
+      "call": "buildInvoice([{ name: 'item', price: 12.88, qty: 1 }], { region: 'TX' })",
+      "expected": "{ subtotal: 1288, discount: 0, tax: 81, total: 1369 } — 1288 * 0.0625 = 80.5 exactly; old Math.floor gave 80 (one cent too low), round-half-up gives 81"
+    },
+    {
+      "name": "new percentage discount code SAVE25 rounds half up on an exact half-cent boundary",
+      "call": "buildInvoice([{ name: 'service', price: 40.02, qty: 1 }], { region: 'OR', code: 'SAVE25' })",
+      "expected": "{ subtotal: 4002, discount: 1001, tax: 0, total: 3001 } — 4002 * 0.25 = 1000.5 exactly, rounds up to 1001; OR has 0% tax so this isolates the discount rounding"
+    },
+    {
+      "name": "new percentage discount code SAVE10, lower-cased, is case-insensitive",
+      "call": "buildInvoice([{ name: 'widget', price: 20.00, qty: 1 }], { region: 'OR', code: 'save10' })",
+      "expected": "{ subtotal: 2000, discount: 200, tax: 0, total: 1800 } — 'save10' must resolve to the same entry as 'SAVE10' (2000 * 0.10 = 200)"
+    },
+    {
+      "name": "existing fixed discount code is also case-insensitive",
+      "call": "buildInvoice([{ name: 'book', price: 30, qty: 1 }], { region: 'OR', code: 'welcome5' })",
+      "expected": "{ subtotal: 3000, discount: 500, tax: 0, total: 2500 } — lower-cased 'welcome5' must still match WELCOME5's fixed 500-cent discount"
+    },
+    {
+      "name": "unknown code still throws regardless of case",
+      "call": "buildInvoice([{ name: 'x', price: 1, qty: 1 }], { code: 'nope' })",
+      "expected": "throws an Error matching /Unknown discount code/"
+    }
+  ]
+}

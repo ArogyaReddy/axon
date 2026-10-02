@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-01T16:00:04.000Z","hook_event_name":"PreToolUse","session_id":"vscode-session-1","cwd":"${REPO}","tool_name":"read_file","tool_input":{"filePath":"${REPO}/src/a.js","startLine":1,"endLine":20},"tool_use_id":"toolu_vrtx_05"}

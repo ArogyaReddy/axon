@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-01T16:00:03.000Z","hook_event_name":"PreToolUse","session_id":"vscode-session-1","cwd":"${REPO}","tool_name":"apply_patch","tool_input":{"explanation":"patch","input":"*** Begin Patch\n*** Update File: ${REPO}/src/a.js\n@@\n-a\n+b\n*** Add File: ${REPO}/config/prod.pem\n+key\n*** End Patch"},"tool_use_id":"toolu_vrtx_04"}

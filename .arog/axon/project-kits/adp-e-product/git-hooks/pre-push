@@ -1,0 +1,7 @@
+#!/bin/sh
+# axon pre-push (adp-e-product): tsc and domain tests for every domain this branch changes, so a "PILOT wins" merge
+# cannot silently revert feature code before Jenkins sees it. Emergency skip: AXON_SKIP_PUSH_TESTS=1.
+[ "${AXON_SKIP_PUSH_TESTS:-}" = "1" ] && { echo "[axon] WARNING: domain tests skipped (AXON_SKIP_PUSH_TESTS=1)" >&2; exit 0; }
+AXON_ADP="${AXON_ROOT:-__AXON_ROOT__}/plugins/axon-adp/bin"
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo HEAD)
+"$AXON_ADP/adp-domain-check" --base "$UPSTREAM" || { echo "[axon] pre-push blocked: domain checks failed" >&2; exit 1; }

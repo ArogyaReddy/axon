@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// axon-trace: one session's timeline from the axon-observe event log (and axon-guard decisions).
+// Usage: axon-trace [--last | --session <id>] [--days N]
+import { load, sessions } from '../lib/events.mjs';
+
+const argv = process.argv.slice(2);
+const opt = k => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : undefined; };
+const all = load({ days: Number(opt('days') ?? 2) });
+const list = sessions(all);
+if (!list.length) { console.log('No events recorded (is the axon-observe plugin enabled?)'); process.exit(0); }
+if (!opt('session') && !argv.includes('--last')) {
+  console.log('Sessions (newest first):');
+  for (const s of list.slice(0, 15)) console.log(`  ${s.session}  ${s.folder ?? '-'}  ${s.first.slice(0, 16).replace('T', ' ')}  ${s.events} events, ${s.tools} tools, ${s.failures} failed, ${s.denies} denied`);
+  console.log('\naxon-trace --last | --session <id>');
+  process.exit(0);
+}
+const id = opt('session') ?? list[0].session;
+const rows = all.filter(e => e.session === id);
+console.log(`Session ${id} (${rows[0]?.folder ?? '-'})`);
+for (const e of rows) {
+  const what = e.event === 'guard' ? `${e.hook} ${e.decision} ${e.rule ?? ''}` : [e.tool, e.agent, e.target, e.detail, e.prompt_chars !== undefined ? `${e.prompt_chars} chars` : ''].filter(Boolean).join('  ');
+  console.log(`${e.ts.slice(11, 19)}  ${e.event.padEnd(19)} ${e.outcome === 'fail' ? 'FAIL ' : ''}${what}`);
+}

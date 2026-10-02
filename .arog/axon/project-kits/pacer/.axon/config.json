@@ -1,0 +1,8 @@
+{
+  "verify": {
+    "commands": ["bash runner/scripts/ci-check.sh"]
+  },
+  "reminders": [
+    { "paths": ["runner/dashboard/*.py"], "message": "server.py (port 8766) does not hot-reload: restart it after editing dashboard/*.py." }
+  ]
+}

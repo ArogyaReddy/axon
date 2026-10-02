@@ -1,0 +1,25 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "${HOME}/transcript.jsonl",
+  "cwd": "${REPO}",
+  "prompt_id": "ec20ecbb-49d5-45aa-9c07-4aa0a08377f8",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "spike-bin",
+    "description": "Run spike-bin command"
+  },
+  "tool_response": {
+    "stdout": "BIN-OK",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_019rsd6ecmdVNa8Jj3CMsDKW",
+  "duration_ms": 710
+}

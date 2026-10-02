@@ -1,0 +1,1 @@
+{"hook_event_name":"PostToolUse","session_id":"cli-session-1","timestamp":1790870400000,"cwd":"${REPO}","tool_name":"create","tool_input":{"path":"${REPO}/src/b.js","file_text":"export const b = 1;\n"},"tool_result":{"result_type":"success","text_result_for_llm":"Created file"}}

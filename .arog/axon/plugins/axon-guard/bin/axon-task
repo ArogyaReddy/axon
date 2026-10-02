@@ -1,0 +1,48 @@
+#!/usr/bin/env node
+// axon-task: the TDD task state machine (RED > GREEN > REFACTOR > DONE). Refuses transitions without evidence.
+//   axon-task start <name> | phase <GREEN|REFACTOR|DONE> | status [--json] | abort --reason "<why>"
+import { spawnSync } from 'node:child_process';
+import { load, startTask, setPhase, abortTask } from '../lib/state.mjs';
+import { option, rootOrExit, main } from '../lib/cli.mjs';
+
+const [cmd, arg] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+
+main(() => {
+  const root = rootOrExit();
+  switch (cmd) {
+    case 'start': {
+      const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
+      const t = startTask(root, arg, { commit: head.status === 0 ? head.stdout.trim() : '' });
+      console.log(`Task "${t.slug}" started in RED. Write a failing test, run it, then: axon-task phase GREEN`);
+      return 0;
+    }
+    case 'phase': {
+      const { from, to } = setPhase(root, arg);
+      console.log(`${from} -> ${to}${to === 'DONE' ? ' (task archived)' : ''}`);
+      return 0;
+    }
+    case 'abort':
+      abortTask(root, option(argv, 'reason'));
+      console.log('Task aborted and archived');
+      return 0;
+    case 'status': {
+      const s = load(root);
+      if (argv.includes('--json')) { console.log(JSON.stringify(s, null, 2)); return 0; }
+      if (!s.task) {
+        console.log(`No active task in ${root}`);
+      } else {
+        const t = s.task;
+        console.log(`Task "${t.slug}" - phase ${t.phase} (started ${t.startedAt})`);
+        console.log(`Test edits: ${t.testEditSeqs.length}, test runs: ${t.runs.length}`);
+        for (const r of t.runs.slice(-5)) console.log(`  run #${r.seq}: pass ${r.pass}, fail ${r.fail}, exit ${r.exit} - ${r.command}`);
+        for (const u of t.unlocked) console.log(`  unlocked ${u.file}: ${u.reason}`);
+      }
+      if (s.verify) console.log(`Last verify: ${s.verify.ok ? 'PASS' : 'FAIL'} at ${s.verify.at}`);
+      return 0;
+    }
+    default:
+      console.log('usage: axon-task start <name> | phase <GREEN|REFACTOR|DONE> | status [--json] | abort --reason "<why>"');
+      return 1;
+  }
+});

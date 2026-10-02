@@ -1,0 +1,10 @@
+{
+  "verify": {
+    "commands": ["npm run lint"]
+  },
+  "reminders": [
+    { "paths": ["metagen/**"], "message": "metagen files sync to the QA.TestCase database for every environment when merged to master. Validate first: bash utils/syncMetagenToDB.sh --dry-run" },
+    { "paths": ["constant.ts"], "message": "New intents go in constants.intents; tests pass the intent key to findNextQuestion, not the raw intent text." }
+  ],
+  "protected": { "paths": ["test.json"] }
+}

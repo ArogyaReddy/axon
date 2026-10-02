@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "allow": [
+      "Bash(git status)", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)", "Bash(git branch *)",
+      "Bash(ls *)", "Bash(rg *)", "Bash(node --test *)", "Bash(npm test *)", "Bash(npm run lint *)",
+      "Bash(npm run compile *)", "Bash(npx tsc --noEmit *)", "Bash(npx jest *)", "Bash(TEST_BUSINESS_DOMAIN=* npx jest *)", "Bash(playwright-cli *)", "Bash(axon-qa *)",
+      "Bash(axon-task *)", "Bash(axon-verify)", "Bash(axon-verify *)", "Bash(axon-issue *)", "Bash(axon-plan-check *)", "Bash(axon-plan-new *)", "Bash(axon-council *)", "Bash(axon doctor *)",
+      "Read(~/.axon/docs/**)", "Read(${AXON_ROOT}/plugins/**)", "Read(~/.claude/plugins/**)", "Edit(~/.axon/docs/**)"
+    ],
+    "ask": [
+      "Bash(git commit *)", "Bash(git push *)", "Bash(git rebase *)", "Bash(git merge *)",
+      "Bash(npm install *)", "Bash(npm publish *)", "Bash(make *)", "Bash(aws *)", "Bash(e-cli *)", "WebFetch",
+      "Bash(axon-unlock-test *)", "Bash(axon-issue close *)"
+    ],
+    "deny": [
+      "Read(**/.env)", "Read(**/.env.*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/id_rsa*)", "Read(**/id_ed25519*)",
+      "Read(~/.aws/credentials)", "Read(~/.ssh/**)", "Read(~/.axon/secrets/**)",
+      "Bash(sudo *)", "Bash(rm -rf /*)", "Bash(rm -rf ~*)", "Bash(git push --force *)", "Bash(git push -f *)",
+      "Bash(git reset --hard *)", "Bash(* --profile PROD*)",
+      "Edit(**/CHANGELOG.md)"
+    ]
+  },
+  "attribution": { "commit": "", "pr": "" },
+  "includeCoAuthoredBy": false,
+  "cleanupPeriodDays": 30,
+  "spinnerTipsEnabled": false,
+  "skillListingBudgetFraction": 0.02,
+  "effortLevel": "high",
+  "outputStyle": "axon-learn:lean",
+  "statusLine": { "type": "command", "command": "node \"${AXON_ROOT}/global/statusline/statusline.mjs\"", "padding": 0, "refreshInterval": 30 },
+  "extraKnownMarketplaces": {
+    "axon": { "source": { "source": "directory", "path": "${AXON_ROOT}" } }
+  },
+  "enabledPlugins": {
+    "axon-core@axon": true, "axon-guard@axon": true, "axon-qa@axon": true, "axon-adp@axon": true,
+    "axon-learn@axon": true, "axon-observe@axon": false
+  },
+  "env": { "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet", "AXON_ROOT": "${AXON_ROOT}" }
+}

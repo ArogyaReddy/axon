@@ -1,0 +1,20 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "${HOME}/transcript.jsonl",
+  "cwd": "${REPO}",
+  "prompt_id": "ec20ecbb-49d5-45aa-9c07-4aa0a08377f8",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "node --test",
+    "description": "Run node test runner"
+  },
+  "tool_use_id": "toolu_01HkKaYMSqMi8LhLd3y7hqib",
+  "error": "Exit code 1\n\u2714 passes (0.35875ms)\n\u2716 fails on purpose (0.340041ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 1\n\u2139 fail 1\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 46.6305\n\n\u2716 failing tests:\n\ntest at test/a.test.mjs:3:1\n\u2716 fails on purpose (0.340041ms)\n  AssertionError [ERR_ASSERTION]: 1 == 2\n      at TestContext.<anonymous> (file://${REPO}/test/a.test.mjs:3:39)\n      at Test.runInAsyncScope (node:async_hooks:228:14)\n      at Test.run (node:internal/test_runner/test:1118:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:787:18)\n      at Test.postRun (node:internal/test_runner/test:1247:19)\n      at Test.run (node:internal/test_runner/test:1175:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:358:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 1,\n    expected: 2,\n    operator: '==',\n    diff: 'simple'\n  }",
+  "is_interrupt": false,
+  "duration_ms": 105
+}

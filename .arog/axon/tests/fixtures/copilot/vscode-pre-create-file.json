@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-01T16:00:01.000Z","hook_event_name":"PreToolUse","session_id":"vscode-session-1","cwd":"${REPO}","tool_name":"create_file","tool_input":{"filePath":"${REPO}/.env","content":"TOKEN=x\n"},"tool_use_id":"toolu_vrtx_02"}

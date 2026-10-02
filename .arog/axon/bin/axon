@@ -1,0 +1,180 @@
+#!/usr/bin/env node
+// axon CLI for your terminal. Commands: install, update, uninstall, legacy, doctor, tools, dashboard, export, issue.
+// Claude uses the plugin tools on its PATH instead: axon-issue (axon-core), axon-task, axon-unlock-test, axon-verify (axon-guard).
+import os from 'node:os';
+import path from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { install, uninstall, buildOverlay } from '../installer/install.mjs';
+import { installPlugins, uninstallPlugins, enabledPlugins, claudeRunner } from '../installer/plugins.mjs';
+import { installTools } from '../installer/tools.mjs';
+import { linkRules, unlinkRules } from '../installer/rules.mjs';
+import { archiveLegacy, restoreLegacy } from '../installer/legacy.mjs';
+import { installKit } from '../installer/kit.mjs';
+import { doctor } from '../installer/doctor.mjs';
+import { exportCopilot, removeCopilot, exportStatus, SETTINGS_NOTE } from '../copilot/export.mjs';
+import { runIssueCli, ISSUE_USAGE } from '../plugins/axon-core/lib/issue-cli.mjs';
+import { parseArgs } from '../plugins/axon-core/lib/args.mjs';
+
+const AXON_ROOT = path.resolve(path.dirname(realpathSync(fileURLToPath(import.meta.url))), '..');
+const [cmd, ...rest] = process.argv.slice(2);
+const { option, flag } = parseArgs(rest);
+const home = option('home') ?? os.homedir();
+
+const USAGE = `axon <command>
+  install   [--profile personal|work] [--dry-run] [--write-through] [--no-tools]
+                                                   merge axon settings into ~/.claude/settings.json (backup first),
+                                                   link the global rules as ~/.claude/rules/axon, install the plugins
+                                                   and the pinned tools
+  update    [--profile personal|work]              after a git pull: install new or missing plugins, refresh a
+                                                   Copilot export (sessions load axon from this checkout)
+  install   --project <repo> --kit <name> [--dry-run] copy a project kit into a repo (never overwrites)
+  uninstall                                        remove the plugins, restore the settings from before install,
+                                                   remove the rules link
+  legacy    archive [--dry-run] | restore          move the legacy ~/.claude items axon replaces (ar-* skills and
+                                                   agents, merged skills, old commands) to ~/.axon/legacy and unhook
+                                                   settings hooks that run ~/.claude/hooks scripts; move
+                                                   ~/.claude/docs to ~/.axon/docs; restore
+  doctor    [--json]                               read-only health checks
+  tools install                                    install the pinned external tools (config/tools.json) into ~/.axon/tools
+  dashboard [--port N]                             local activity page (axon-observe events), http://127.0.0.1:47301
+  export    --copilot [--repo <dir>] [--observe] [--dry-run] [--remove]
+                                                   copy axon hooks, skills, agents and rules for VS Code Copilot and
+                                                   the Copilot CLI into ~/.copilot (or <repo>/.github)
+${ISSUE_USAGE.split('\n').map(l => `  ${l}`).join('\n')}`;
+
+function reportPlugins(p) {
+  console.log(`Plugins: ${p.installed.length ? `installed ${p.installed.join(', ')}` : 'all installed already'}${p.marketplace === 'added' ? ' (axon marketplace added)' : ''}.`);
+  return 0;
+}
+
+function installedProfile() {
+  try { return JSON.parse(readFileSync(path.join(home, '.axon', 'state', 'installed.json'), 'utf8')).profile; } catch { return null; }
+}
+
+function main() {
+  switch (cmd) {
+    case 'install': {
+      if (option('project')) {
+        const r = installKit({ axonRoot: AXON_ROOT, repo: path.resolve(option('project')), kit: option('kit') ?? 'adp-e-product', dryRun: flag('dry-run') });
+        console.log(`${flag('dry-run') ? 'Would copy' : 'Copied'}: ${r.copied.join(', ') || 'nothing'}`);
+        if (r.skipped.length) console.log(`Skipped (already there, not changed): ${r.skipped.join(', ')}`);
+        return 0;
+      }
+      const r = install({ home, axonRoot: AXON_ROOT, profile: option('profile') ?? 'personal', dryRun: flag('dry-run'), writeThrough: flag('write-through') });
+      if (r.mode === 'dry-run') console.log(r.changes ? `${r.changes} change(s) would be made:\n${r.diff}` : 'Already up to date. Nothing would change.');
+      else if (r.mode === 'home-manager') console.log(`${r.note}\n\n${r.mergedJson}`);
+      else console.log(r.changes ? `Applied ${r.changes} change(s). Backup: ${r.backup ?? '(no previous file)'}` : 'Already up to date.');
+      const rules = linkRules({ home, axonRoot: AXON_ROOT, dryRun: flag('dry-run') });
+      console.log({ linked: `Linked global rules: ${rules.link} -> ${rules.target}`, present: 'Global rules already linked.',
+        'dry-run': `Would link global rules: ${rules.link} -> ${rules.target}`, 'home-manager': rules.note }[rules.mode]);
+      const plugins = enabledPlugins(buildOverlay(AXON_ROOT, option('profile') ?? 'personal'));
+      if (flag('dry-run')) { console.log(`Would install plugins: ${plugins.join(', ')}`); return 0; }
+      if (r.mode === 'home-manager') { console.log('Plugins: apply the settings above first, then run: axon update'); return 0; }
+      reportPlugins(installPlugins({ axonRoot: AXON_ROOT, plugins, run: claudeRunner(home) }));
+      if (!flag('no-tools')) {
+        try {
+          const t = installTools({ home, axonRoot: AXON_ROOT });
+          console.log(t.installed.length ? `Tools: installed ${t.installed.join(', ')}.` : 'Tools: pinned versions already installed.');
+        } catch (e) {
+          console.log(`Tools: ${e.message}. Everything else is installed; retry with: axon tools install (needs npm access).`);
+          return 1;
+        }
+      }
+      return 0;
+    }
+    case 'update': {
+      // Plugins from a local directory marketplace load in place from this checkout, so a pull takes effect in the next
+      // session by itself; update adds plugins that are new or missing and refreshes the Copilot copies.
+      const profile = option('profile') ?? installedProfile() ?? 'personal';
+      reportPlugins(installPlugins({ axonRoot: AXON_ROOT, plugins: enabledPlugins(buildOverlay(AXON_ROOT, profile)), run: claudeRunner(home) }));
+      for (const x of exportStatus({ axonRoot: AXON_ROOT, home }).filter(e => e.stale.length)) {
+        const e = exportCopilot({ axonRoot: AXON_ROOT, home, target: x.target, observe: x.command.includes('--observe') });
+        console.log(`Copilot export in ${x.target}: wrote ${e.written.length} file(s)${e.skipped.length ? `, skipped ${e.skipped.length} changed by you` : ''}.`);
+      }
+      console.log('Claude Code loads axon from this checkout: start a new session to pick up the changes.');
+      return 0;
+    }
+    case 'uninstall': {
+      const p = uninstallPlugins({ run: claudeRunner(home) });
+      console.log(p.removed.length ? `Removed plugins: ${p.removed.join(', ')}` : 'No axon plugins were installed.');
+      const r = uninstall({ home });
+      console.log({ 'not-installed': 'axon settings are not installed.', 'restored-backup': 'Restored your original settings file.',
+        'reversed-changes': 'Removed axon changes and kept your later edits.', 'settings-missing': 'Settings file was missing; state cleared.' }[r.mode]);
+      const rules = unlinkRules({ home });
+      console.log({ 'not-installed': 'Global rules were not linked.', unlinked: 'Removed the global rules link.',
+        'left-user-link': 'Left ~/.claude/rules/axon alone: it no longer points at axon.', 'already-removed': 'Global rules link was already gone.' }[rules.mode]);
+      return 0;
+    }
+    case 'legacy': {
+      if (rest[0] === 'archive') {
+        const r = archiveLegacy({ home, dryRun: flag('dry-run') });
+        console.log(r.moved.length ? `${flag('dry-run') ? 'Would move' : 'Moved'} ${r.moved.length} item(s)${r.dir ? ` to ${r.dir}` : ''}:\n  ${r.moved.join('\n  ')}` : 'No legacy items to move.');
+        if (r.skipped.length) console.log(`Left alone (symlinks, for example home-manager): ${r.skipped.join(', ')}`);
+        if (r.hooks.length) {
+          const verb = r.hooksManual ? 'Remove these hooks from your home-manager settings source by hand' : flag('dry-run') ? 'Would unhook' : 'Unhooked';
+          console.log(`${verb} (legacy scripts in ~/.claude/hooks; axon's hooks replace them):\n  ${r.hooks.join('\n  ')}`);
+        }
+        if (r.docs.length) console.log(`${flag('dry-run') ? 'Would move' : 'Moved'} ${r.docs.length} document folder(s)/file(s) from ~/.claude/docs to ~/.axon/docs (Claude Code asks before every edit under ~/.claude).`);
+        if (r.docsKept.length) console.log(`Left in ~/.claude/docs (the same name already exists in ~/.axon/docs): ${r.docsKept.join(', ')}`);
+        if (r.docsLinked) console.log('~/.claude/docs is a link: left alone; point it elsewhere or move its contents to ~/.axon/docs yourself.');
+        if (r.dir) console.log('Nothing was deleted. Undo with: axon legacy restore');
+        return 0;
+      }
+      if (rest[0] === 'restore') {
+        const r = restoreLegacy({ home });
+        console.log(`Restored ${r.restored.length} item(s)${r.hooks ? `, ${r.hooks} hook(s)` : ''}${r.docs ? `, ${r.docs} document folder(s)/file(s)` : ''}.`);
+        if (r.conflicts.length) console.log(`Kept in the archive (something exists at that path now): ${r.conflicts.join(', ')}`);
+        return 0;
+      }
+      console.log('Usage: axon legacy archive [--dry-run] | axon legacy restore');
+      return 1;
+    }
+    case 'doctor': {
+      const r = doctor({ home, axonRoot: AXON_ROOT });
+      if (flag('json')) { console.log(JSON.stringify(r, null, 2)); return r.summary.fail ? 1 : 0; }
+      const icon = { pass: 'ok  ', warn: 'WARN', fail: 'FAIL' };
+      for (const c of r.checks) console.log(`${icon[c.status]}  ${c.id.padEnd(18)} ${c.message}`);
+      console.log(`\n${r.summary.pass} pass, ${r.summary.warn} warn, ${r.summary.fail} fail`);
+      return r.summary.fail ? 1 : 0;
+    }
+    case 'tools': {
+      if (rest[0] !== 'install') { console.log('Usage: axon tools install'); return 1; }
+      const t = installTools({ home, axonRoot: AXON_ROOT });
+      console.log(t.installed.length ? `Installed: ${t.installed.join(', ')}` : 'Pinned tools already installed.');
+      return 0;
+    }
+    case 'dashboard': {
+      const r = spawnSync(process.execPath, [path.join(AXON_ROOT, 'plugins', 'axon-observe', 'dashboard', 'server.mjs'), '--port', option('port') ?? '47301'], { stdio: 'inherit' });
+      return r.status ?? 0;
+    }
+    case 'export': {
+      if (!flag('copilot')) { console.log('Usage: axon export --copilot [--repo <dir>] [--observe] [--dry-run] [--remove]'); return 1; }
+      const repo = option('repo') && path.resolve(option('repo'));
+      const target = repo ? path.join(repo, '.github') : path.join(home, '.copilot');
+      if (flag('remove')) {
+        const r = removeCopilot({ home, target });
+        if (r.mode === 'not-exported') { console.log(`Nothing exported to ${target}.`); return 0; }
+        console.log(`Removed ${r.removed.length} file(s) from ${target}.`);
+        if (r.kept.length) console.log(`Kept (changed since export): ${r.kept.join(', ')}`);
+        return 0;
+      }
+      const r = exportCopilot({ axonRoot: AXON_ROOT, home, target, observe: flag('observe'), dryRun: flag('dry-run') });
+      console.log(`${flag('dry-run') ? 'Would write' : 'Wrote'} ${r.written.length} file(s) to ${target} (${r.unchanged.length} already up to date).`);
+      if (r.removed.length) console.log(`${flag('dry-run') ? 'Would remove' : 'Removed'} (no longer exported): ${r.removed.join(', ')}`);
+      if (r.skipped.length) console.log(`Skipped (not axon's, or changed by you): ${r.skipped.join(', ')}`);
+      if (repo) console.log(`These files hold full paths on this Mac: keep them out of commits (for example in .git/info/exclude).`);
+      console.log(`\n${SETTINGS_NOTE}`);
+      return 0;
+    }
+    case 'issue':
+      return runIssueCli(rest, { home });
+    default:
+      console.log(USAGE);
+      return cmd ? 1 : 0;
+  }
+}
+
+try { process.exitCode = main(); }
+catch (e) { console.error(`axon: ${e.message}`); process.exitCode = 1; }

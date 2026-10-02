@@ -1,0 +1,6 @@
+#!/bin/sh
+# axon pre-commit (adp-e-product): fast ADP checks on the changed files. Local hook in .git/hooks (not committed).
+AXON_ADP="${AXON_ROOT:-__AXON_ROOT__}/plugins/axon-adp/bin"
+for c in check-shared-imports check-meta-fresh check-i18n check-security-fields check-lifecycle; do
+  "$AXON_ADP/$c" || { echo "[axon] pre-commit blocked by $c (fix it, or ask before using --no-verify)" >&2; exit 1; }
+done

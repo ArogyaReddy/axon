@@ -1,0 +1,1 @@
+{"hook_event_name":"PreToolUse","session_id":"cli-session-1","timestamp":1790870400000,"cwd":"${REPO}","tool_name":"bash","tool_input":{"command":"git push --force origin main","description":"Force push","mode":"sync"}}

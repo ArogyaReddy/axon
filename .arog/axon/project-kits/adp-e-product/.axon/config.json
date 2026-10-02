@@ -1,0 +1,17 @@
+{
+  "verify": {
+    "commands": [
+      "check-shared-imports",
+      "check-meta-fresh",
+      "check-i18n",
+      "check-security-fields",
+      "check-lifecycle",
+      "adp-domain-check"
+    ]
+  },
+  "reminders": [
+    { "paths": ["meta/src/**"], "message": "meta/build must be rebuilt before pushing: make meta && npm run load-meta -- FIT (IFX-002)." },
+    { "paths": ["src/shared/**"], "message": "Any package newly imported here must be in the ROOT package.json, not only a domain package.json (IFX-001)." }
+  ],
+  "protected": { "paths": ["meta/build/**", "meta/build-metasync/**"] }
+}

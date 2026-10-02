@@ -1,0 +1,20 @@
+{
+  "cwd": "${REPO}",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "session_name": "my-session",
+  "transcript_path": "${REPO}/transcript.jsonl",
+  "model": { "id": "claude-sonnet-5", "display_name": "Sonnet 5" },
+  "workspace": { "current_dir": "${REPO}", "project_dir": "${REPO}", "added_dirs": [], "git_worktree": "feature-xyz",
+    "repo": { "host": "github.com", "owner": "acme", "name": "payroll" } },
+  "version": "2.1.197",
+  "output_style": { "name": "Explanatory" },
+  "cost": { "total_cost_usd": 1.2345, "total_duration_ms": 3900000, "total_api_duration_ms": 2300, "total_lines_added": 156, "total_lines_removed": 23 },
+  "context_window": { "total_input_tokens": 15500, "total_output_tokens": 1200, "context_window_size": 200000, "used_percentage": 23, "remaining_percentage": 77 },
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "effort": { "level": "high" },
+  "thinking": { "enabled": true },
+  "rate_limits": { "five_hour": { "used_percentage": 23.5, "resets_at": 1738425600 }, "seven_day": { "used_percentage": 41.2, "resets_at": 1738857600 } },
+  "pr": { "number": 1234, "url": "https://github.com/acme/payroll/pull/1234", "review_state": "pending" },
+  "worktree": { "name": "my-feature", "path": "${REPO}/.claude/worktrees/my-feature", "branch": "worktree-my-feature" }
+}
