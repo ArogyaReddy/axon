@@ -1,0 +1,35 @@
+[
+  {
+    "key": "cmd+`",
+    "command": "workbench.action.terminal.toggleTerminal"
+  },
+  {
+    "key": "cmd+shift+`",
+    "command": "workbench.action.terminal.new"
+  },
+  {
+    "key": "cmd+shift+c",
+    "command": "workbench.action.terminal.copySelection",
+    "when": "terminalTextSelected"
+  },
+  {
+    "key": "cmd+shift+v",
+    "command": "workbench.action.terminal.paste"
+  },
+  {
+    "key": "cmd+shift+left",
+    "command": "workbench.action.terminal.focusPreviousPane"
+  },
+  {
+    "key": "cmd+shift+right",
+    "command": "workbench.action.terminal.focusNextPane"
+  },
+  {
+    "key": "cmd+shift+tab",
+    "command": "workbench.action.terminal.focusPreviousTerminal"
+  },
+  {
+    "key": "cmd+tab",
+    "command": "workbench.action.terminal.focusNextTerminal"
+  }
+]

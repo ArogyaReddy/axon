@@ -1,6 +1,6 @@
 # VS Code Terminal Appearance Templates
 
-This collection preserves the current appearance as Template 1 and provides nineteen alternatives. All twenty templates use the same terminal behavior, Meslo font fallback chain, compact workbench layout, right sidebar, right-side terminal tabs, zsh profile, and integrated shell behavior. They differ mainly in colors and visual mood.
+This collection preserves the current appearance as Template 1 and provides twenty alternatives. All twenty-one templates use the same terminal behavior, Meslo font fallback chain, compact workbench layout, right sidebar, right-side terminal tabs, zsh profile, and integrated shell behavior. They differ mainly in colors and visual mood.
 
 ## Templates
 
@@ -26,6 +26,7 @@ This collection preserves the current appearance as Template 1 and provides nine
 | 18 | [template-18-arctic-light.jsonc](../vscode-settings-templates/templates/template-18-arctic-light.jsonc) | Cool arctic light theme with cyan-blue accents |
 | 19 | [template-19-mint-light.jsonc](../vscode-settings-templates/templates/template-19-mint-light.jsonc) | Soft mint light theme with emerald accents |
 | 20 | [template-20-rose-light.jsonc](../vscode-settings-templates/templates/template-20-rose-light.jsonc) | Pale rose light theme with berry accents |
+| 21 | [template-21-github-lime-sky.jsonc](../vscode-settings-templates/templates/template-21-github-lime-sky.jsonc) | GitHub-inspired black with lime headings and sky-blue links |
 
 All files and the switcher live together in [vscode-settings-templates](../vscode-settings-templates/).
 
@@ -65,9 +66,13 @@ cd vscode-settings-templates
 
 Do not type `vscode-settings-templates --list` by itself. zsh does not search the current directory, and from the repository root `vscode-settings-templates` is a directory rather than a command. The `./` prefix is required.
 
-The menu shows all twenty templates and a restore option. Before every real switch, it creates a timestamped backup under `vscode-settings-templates/backups/`, updates only the documented appearance keys, and preserves unrelated settings.
+The menu shows all twenty-one templates and a restore option. Before every real switch, it creates a timestamped backup under `vscode-settings-templates/backups/`, updates only the documented appearance keys, and preserves unrelated settings.
 
-Templates 11-15 are the new high-contrast dark group. Template 11 is the black-and-gold combination, Template 12 is black-and-lemon, Template 13 is the obsidian/crimson claw style, Template 14 is black-and-copper, and Template 15 is deep amber. Templates 16-20 are light workspaces: paper, ivory solar, arctic, mint, and rose.
+Templates 11-15 are the high-contrast dark group. Template 11 is the black-and-gold combination, Template 12 is black-and-lemon, Template 13 is the obsidian/crimson claw style, Template 14 is black-and-copper, and Template 15 is deep amber. Templates 16-20 are light workspaces: paper, ivory solar, arctic, mint, and rose. Template 21 is the GitHub-inspired black/lime/sky-blue Markdown workspace.
+
+### Template 21 Markdown styling
+
+Template 21 adds `editor.tokenColorCustomizations` in addition to the workbench palette. In Markdown files, H1-H3 use lime tones, H4-H6 use pale sky-blue tones, links use sky blue with underlining, inline code uses lime, bold text uses soft white, and blockquotes use pale blue italics. This affects Markdown syntax highlighting in the editor; it does not change the rendered GitHub website.
 
 Useful non-interactive commands:
 

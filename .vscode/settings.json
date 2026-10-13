@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^mdfind \"kMDItemFonts == 'MesloLGS NF'\" \\| head -5; git status --short$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

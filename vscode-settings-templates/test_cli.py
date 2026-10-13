@@ -151,7 +151,21 @@ def test_backup_uniqueness_and_restore_filter() -> None:
         assert json.loads(settings_path.read_text()) == {"restored": True}
 
 
+def test_github_markdown_token_template() -> None:
+    base = switcher.load_jsonc(ROOT / "templates/template-1-neutral-charcoal.jsonc")
+    github_template = ROOT / "templates/template-21-github-lime-sky.jsonc"
+    with tempfile.TemporaryDirectory() as directory:
+        settings_path = Path(directory) / "settings.json"
+        settings_path.write_text(json.dumps(base, indent=2))
+        switcher.apply_template(settings_path, github_template, Path(directory) / "backups", False)
+        parsed = switcher.load_jsonc(settings_path)
+        rules = parsed["editor.tokenColorCustomizations"]["textMateRules"]
+        assert any(rule["scope"] == "markup.heading.1.markdown" for rule in rules)
+        assert parsed["workbench.colorCustomizations"]["focusBorder"] == "#7DD9FF"
+
+
 if __name__ == "__main__":
     test_jsonc_and_structural_replacement()
     test_backup_uniqueness_and_restore_filter()
+    test_github_markdown_token_template()
     print("CLI regression tests passed")

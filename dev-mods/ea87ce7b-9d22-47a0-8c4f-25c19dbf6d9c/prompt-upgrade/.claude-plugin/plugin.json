@@ -1,0 +1,6 @@
+{
+  "name": "prompt-upgrade",
+  "version": "0.1.0",
+  "description": "Upgrades a rough prompt into a clear one before it is sent, with a quick Q&A and a before/after review.",
+  "types": "./types/index.d.ts"
+}

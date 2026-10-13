@@ -1,0 +1,6 @@
+{
+  "name": "clean-view",
+  "version": "0.1.0",
+  "description": "Hides raw tool-call rows and shows a plain-English checklist above the prompt.",
+  "types": "./types/index.d.ts"
+}

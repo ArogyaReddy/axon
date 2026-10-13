@@ -1,0 +1,169 @@
+{
+  "workbench.colorTheme": "Monokai",
+  "workbench.iconTheme": "vscode-icons",
+  "editor.minimap.enabled": false,
+
+  // Cucumber/Gherkin Settings
+  "cucumber.features": [
+    // "features/**/*.feature"
+    "features/*.feature"
+  ],
+  "cucumber.stepDefinitions": [
+    // "features/step_definitions/**/*.js",
+    "features/step_definitions/*.js",
+    "features/support/*.js"
+  ],
+  "cucumber.glue": [
+    "features/step_definitions",
+    "features/support"
+  ],
+  "editor.inlineSuggest.edits.allowCodeShifting": "never",
+  "github.copilot.nextEditSuggestions.enabled": false,
+  "window.autoDetectColorScheme": true,
+  "github.copilot.enable": {
+    "*": false,
+    "plaintext": true,
+    "markdown": false,
+    "scminput": false
+  },
+  "chat.viewSessions.orientation": "stacked",
+
+  // ========================================
+  // Professional Terminal Configuration
+  // ========================================
+  
+  "terminal.integrated.profiles.osx": {
+    "zsh": {
+      "path": "/bin/zsh",
+      "args": ["-l"]
+    },
+    "zsh (Homebrew)": {
+      "path": "/opt/homebrew/bin/zsh",
+      "args": ["-l"]
+    },
+    "bash": {
+      "path": "/bin/bash",
+      "args": ["-l"]
+    }
+  },
+  "terminal.integrated.defaultProfile.osx": "zsh",
+  
+  // Shell Integration & Behavior
+  "terminal.integrated.shellIntegration.enabled": true,
+  "terminal.integrated.shellIntegration.decorationsEnabled": "both",
+  "terminal.integrated.shellIntegration.history": 100,
+  
+  // Font Configuration (for icons and ligatures)
+  "terminal.integrated.fontFamily": "'MesloLGS NF', 'Menlo', 'Monaco', monospace",
+  "terminal.integrated.fontWeight": "normal",
+  "terminal.integrated.lineHeight": 1.2,
+  
+  // Cursor & Visual Settings
+  "terminal.integrated.cursorBlinking": true,
+  "terminal.integrated.cursorStyle": "line",
+  "terminal.integrated.cursorWidth": 2,
+  "terminal.integrated.cursorStyleInactive": "outline",
+  
+  // Copy/Paste & Selection
+  "terminal.integrated.copyOnSelection": true,
+  "terminal.integrated.rightClickBehavior": "default",
+  "terminal.integrated.macOptionIsMeta": true,
+  "terminal.integrated.macOptionClickForcesSelection": true,
+  
+  // Tab & Window Settings
+  "terminal.integrated.tabs.enabled": true,
+  "terminal.integrated.tabs.location": "right",
+  "terminal.integrated.tabs.showActions": "singleTerminal",
+  "terminal.integrated.tabs.showActiveTerminal": "singleTerminalOrNarrow",
+  "terminal.integrated.splitCwd": "workspaceRoot",
+  
+  // Performance & Rendering
+  "terminal.integrated.gpuAcceleration": "on",
+  "terminal.integrated.smoothScrolling": true,
+  "terminal.integrated.fastScrollSensitivity": 3,
+  "terminal.integrated.mouseWheelScrollSensitivity": 1,
+  
+  // Environment
+  "terminal.integrated.inheritEnv": true,
+  "terminal.integrated.setLocaleVariables": true,
+  "terminal.integrated.env.osx": {},
+  
+  // Scrollback & History
+  "terminal.integrated.scrollback": 10000,
+  "terminal.integrated.persistentSessionScrollback": 100,
+  
+  // Sound & Notifications
+  "accessibility.signals.terminalBell": {
+    "sound": "off"
+  },
+  "terminal.integrated.enableVisualBell": false,
+  "terminal.integrated.bellDuration": 1000,
+  
+  // Advanced Features
+  "terminal.integrated.enableMultiLinePasteWarning": "auto",
+  "terminal.integrated.confirmOnKill": "panel",
+  "terminal.integrated.confirmOnExit": "hasChildProcesses",
+  "terminal.integrated.allowChords": true,
+  "terminal.integrated.allowMnemonics": false,
+  "terminal.integrated.commandsToSkipShell": [
+    "language-julia.interrupt",
+    "kilo-code.new.agentManagerOpen",
+    "kilo-code.new.agentManager.showTerminal",
+    "kilo-code.new.agentManager.runScript",
+    "kilo-code.new.agentManager.previousTerminal",
+    "kilo-code.new.agentManager.nextTerminal"
+  ],
+  
+  // Color Customization (optional - remove if you prefer default)
+  "terminal.integrated.minimumContrastRatio": 4.5,
+  "workbench.colorCustomizations": {
+
+    "terminal.background": "#1E1E1E",
+    "terminal.foreground": "#D4D4D4",
+    "terminalCursor.background": "#D4D4D4",
+    "terminalCursor.foreground": "#D4D4D4",
+    "terminal.ansiBlack": "#1E1E1E",
+    "terminal.ansiBlue": "#569CD6",
+    "terminal.ansiBrightBlack": "#666666",
+    "terminal.ansiBrightBlue": "#569CD6",
+    "terminal.ansiBrightCyan": "#4EC9B0",
+    "terminal.ansiBrightGreen": "#B5CEA8",
+    "terminal.ansiBrightMagenta": "#C586C0",
+    "terminal.ansiBrightRed": "#F48771",
+    "terminal.ansiBrightWhite": "#E5E5E5",
+    "terminal.ansiBrightYellow": "#DCB67A",
+    "terminal.ansiCyan": "#4EC9B0",
+    "terminal.ansiGreen": "#608B4E",
+    "terminal.ansiMagenta": "#C586C0",
+    "terminal.ansiRed": "#D16969",
+    "terminal.ansiWhite": "#D4D4D4",
+    "terminal.ansiYellow": "#D7BA7D"
+  },
+  "vsicons.dontShowNewVersionMessage": true,
+  "workbench.preferredDarkColorTheme": "Cobalt2",
+  "github.copilot.nextEditSuggestions.eagerness": "auto",
+  "workbench.activityBar.compact": true,
+  "markdown-preview-enhanced.previewTheme": "atom-light.css",
+  "kilo-code.new.agentWorkStyle": "skipped",
+  "kilo-code.new.showTaskTimeline": true,
+  "workbench.editor.empty.hint": "hidden",
+  "kilo-code.new.autoApprove.enabled": true,
+  "chat.tools.urls.autoApprove": {
+    "https://code.visualstudio.com": true,
+    "https://github.com/microsoft/vscode/wiki/*": true,
+    "https://code.claude.com/docs/en/best-practices": true,
+    "https://code.claude.com/docs/en": true,
+    "https://code.claude.com/docs": true,
+    "https://code.claude.com": true,
+    "https://*.claude.com": true,
+    "https://code.claude.com/docs/en/hooks": true,
+    "https://code.claude.com/docs/en/claude-md": true,
+    "https://code.claude.com/docs/en/slash-commands": true
+  },
+  "workbench.preferredLightColorTheme": "Cobalt2",
+  "chat.useClaudeHooks": true,
+  "chat.useHooks": true,
+  "workbench.sideBar.location": "right",
+  "window.density.layout": "compact",
+  "claudeCode.hideOnboarding": true
+}

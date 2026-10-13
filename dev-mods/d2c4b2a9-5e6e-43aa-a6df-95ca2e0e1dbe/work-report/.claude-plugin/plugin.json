@@ -1,0 +1,7 @@
+{
+  "name": "work-report",
+  "version": "0.1.0",
+  "description": "A pane showing finished tasks, hours saved and their estimated dollar value, by day/week/month/year",
+  "types": "./types/index.d.ts",
+  "author": { "name": "Arogya Reddy", "email": "arog0507@gmail.com" }
+}

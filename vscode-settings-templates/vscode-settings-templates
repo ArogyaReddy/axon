@@ -38,6 +38,7 @@ DESCRIPTIONS = {
     18: "Arctic Light - cool white with cyan-blue accents",
     19: "Mint Light - soft green-white with emerald accents",
     20: "Rose Light - pale rose with berry accents",
+    21: "GitHub Lime Sky - black with lime headings and sky-blue links",
 }
 
 
@@ -310,20 +311,27 @@ def skip_jsonc_whitespace(text: str, start: int) -> int:
 
 def replace_object(text: str, key: str, value: dict) -> str:
     entry = find_top_level_key(text, key)
-    if entry is None or text[entry["value_start"]] != "{":
-        raise RuntimeError(f"Required setting is missing: {key}")
+    if entry is None:
+        opening = find_root_opening(text)
+        closing = find_matching_brace(text, opening)
+        indent = infer_top_level_indent(text, opening, closing)
+        return insert_top_level_value(text, key, format_object_value(value, indent))
+    if text[entry["value_start"]] != "{":
+        raise RuntimeError(f"Required setting is not an object: {key}")
     opening = entry["value_start"]
     closing = find_matching_brace(text, opening)
-    indent = entry["indent"]
+    formatted = format_object_value(value, entry["indent"])
+    return text[:opening] + formatted + text[closing + 1 :]
+
+
+def format_object_value(value: dict, indent: str) -> str:
     pretty_lines = json.dumps(value, indent=2).splitlines()
     nested_indent = indent if indent else "  "
     pretty_lines = [pretty_lines[0]] + [
         nested_indent + line[2:] if line.startswith("  ") else line
         for line in pretty_lines[1:]
     ]
-    formatted = pretty_lines[0] + "\n"
-    formatted += "\n".join(indent + line for line in pretty_lines[1:])
-    return text[:opening] + formatted + text[closing + 1 :]
+    return pretty_lines[0] + "\n" + "\n".join(indent + line for line in pretty_lines[1:])
 
 
 def find_last_top_level_entry(text: str) -> dict | None:
@@ -515,12 +523,16 @@ def replace_scalar_or_add(text: str, key: str, value: object) -> str:
         value_end = find_scalar_end(text, entry["value_start"])
         return text[: entry["value_start"]] + json.dumps(value) + text[value_end:]
 
+    return insert_top_level_value(text, key, json.dumps(value))
+
+
+def insert_top_level_value(text: str, key: str, serialized_value: str) -> str:
     opening = find_root_opening(text)
     closing = find_matching_brace(text, opening)
     indent = infer_top_level_indent(text, opening, closing)
     last_entry = find_last_top_level_entry(text[:closing])
     if last_entry is None:
-        addition = f'\n{indent}{json.dumps(key)}: {json.dumps(value)}\n'
+        addition = f'\n{indent}{json.dumps(key)}: {serialized_value}\n'
         return text[: opening + 1] + addition + text[opening + 1 :]
     value_end = find_value_end(text, last_entry["value_start"])
     after_value = skip_jsonc_whitespace(text, value_end)
@@ -528,7 +540,7 @@ def replace_scalar_or_add(text: str, key: str, value: object) -> str:
     comma = "" if has_comma else ","
     with_comma = text[:value_end] + comma + text[value_end:]
     closing += len(comma)
-    addition = f'\n{indent}{json.dumps(key)}: {json.dumps(value)}\n'
+    addition = f'\n{indent}{json.dumps(key)}: {serialized_value}\n'
     return with_comma[:closing] + addition + with_comma[closing:]
 
 
@@ -539,14 +551,18 @@ def apply_template(settings_path: Path, template_path: Path, backup_dir: Path, d
     current = settings_path.read_text()
     load_jsonc(settings_path)
     updated = current
-    color_customizations = template.pop(COLOR_KEY, None)
+    object_customizations = {}
+    for object_key in (COLOR_KEY, "editor.tokenColorCustomizations"):
+        if object_key in template:
+            object_customizations[object_key] = template.pop(object_key)
     for key, value in template.items():
         if isinstance(value, (dict, list)):
             raise RuntimeError(f"Template key is not a scalar setting: {key}")
         updated = replace_scalar_or_add(updated, key, value)
-    if color_customizations is None:
+    if COLOR_KEY not in object_customizations:
         raise RuntimeError(f"Template is missing {COLOR_KEY}")
-    updated = replace_object(updated, COLOR_KEY, color_customizations)
+    for key, value in object_customizations.items():
+        updated = replace_object(updated, key, value)
     if dry_run:
         print(f"Dry run: {template_path.name} is valid and would update {settings_path}")
         return
@@ -617,15 +633,15 @@ def create_exclusive_backup(settings_path: Path, backup_dir: Path, prefix: str) 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Switch VS Code appearance templates safely.")
     parser.add_argument("--list", action="store_true", help="list available templates")
-    parser.add_argument("--template", type=int, choices=range(1, 21), help="apply template number")
+    parser.add_argument("--template", type=int, choices=range(1, 22), help="apply template number")
     parser.add_argument("--dry-run", action="store_true", help="validate without changing settings")
     parser.add_argument("--settings-file", type=Path, default=DEFAULT_SETTINGS)
     parser.add_argument("--backup-dir", type=Path, default=BACKUP_DIR)
     args = parser.parse_args()
     paths = template_paths()
     template_ids = [int(path.name.split("-")[1]) for path in paths]
-    if template_ids != list(range(1, 21)):
-        print(f"Expected template IDs 1-20, found {template_ids}", file=sys.stderr)
+    if template_ids != list(range(1, 22)):
+        print(f"Expected template IDs 1-21, found {template_ids}", file=sys.stderr)
         return 1
     if args.list:
         for index, path in enumerate(paths, start=1):

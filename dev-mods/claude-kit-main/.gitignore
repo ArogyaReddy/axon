@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+# Generated per machine by /plugin-types
+.claude/types/
+**/.claude-plugin/types/
+tsconfig.json
+
+# Built locally by plugins/session-band/notifier/build.sh
+plugins/session-band/notifier/*.app/
